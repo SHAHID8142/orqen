@@ -1,0 +1,269 @@
+/* Orqen global styles — light theme, minimal, no decorative effects. */
+
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #191b1f;
+  --muted: #666b74;
+  --border: #e3e5e9;
+  --accent: #4f46e5;
+  --accent-soft: #eef0ff;
+  --accent-border: #dfe3ff;
+  --ok: #15803d;
+  --ok-soft: #e8f5ec;
+  --ok-border: #cfe7d6;
+  --err: #b91c1c;
+  --err-soft: #fdecec;
+  --err-border: #f2cfcf;
+  --warn: #b45309;
+  --warn-soft: #fdf3e7;
+  --warn-border: #ecd9bd;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Shell layout --- */
+
+.app-shell {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+
+.app-name {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.phase-badge {
+  font-size: 12.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.app-main {
+  flex: 1;
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 24px 40px;
+}
+
+.app-footer {
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* --- Hero --- */
+
+.hero h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+
+.hero p {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* --- Runtime status card --- */
+
+.runtime-card {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.runtime-card h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.runtime-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.runtime-label {
+  color: var(--muted);
+}
+
+.runtime-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.status-err {
+  color: var(--err);
+  background: var(--err-soft);
+  border: 1px solid var(--err-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.status-loading {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.runtime-error {
+  margin: 12px 0 0;
+  color: var(--err);
+  background: var(--err-soft);
+  border: 1px solid var(--err-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13.5px;
+}
+
+/* --- Capability panels --- */
+
+.panels {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.panel ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.panel.planned {
+  border-style: dashed;
+}
+
+.panel .panel-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* --- Responsive --- */
+
+@media (max-width: 640px) {
+  .panels {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-list li {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .app-header {
+    padding: 12px 16px;
+  }
+
+  .app-main {
+    padding: 20px 16px 32px;
+  }
+}
