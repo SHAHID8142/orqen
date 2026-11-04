@@ -19,7 +19,7 @@ Only observed results are recorded here — every entry lists the actual command
 | 11 | Repository privacy | `gh repo view SHAHID8142/orqen --json visibility` | PASS — `PRIVATE` |
 | 12 | Secret scan before push | grep-based scan of tracked files + `git diff --cached` review | PASS — no credentials/tokens/keys found |
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
-| 14 | CI run on GitHub | GitHub Actions `ci.yml` on first push | PENDING — to be updated with the observed run result after push |
+| 14 | CI run on GitHub | GitHub Actions `ci.yml` on first push | IN PROGRESS — first push (926b3be) produced a `startup_failure` with 0 jobs and no annotations (run 41932865723). The workflow file itself validates clean (`actionlint` exit 0; GitHub shows it `active`), so this matches the documented new-repository first-run infrastructure failure mode. A fresh run was triggered by the following commit; result recorded here once observed. |
 
 ## CI verification (GitHub Actions, ubuntu-latest)
 

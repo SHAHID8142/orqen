@@ -39,3 +39,9 @@ Only entries with a validated root cause and an applied correction belong here. 
 **Root cause:** wrote the theme value in lowercase; the Tauri 2 config schema requires the enum spelling `"Light"` / `"Dark"`.
 **Correction:** set `"theme": "Light"`; `tauri dev` then validated and launched.
 **Prevention rule:** treat `tauri.conf.json` as schema-validated — let the editor schema (or `cargo tauri dev` validation) catch enum spellings; never hand-guess enum values.
+
+## L-007 | 2026-11-05 | GitHub Actions first push can end in `startup_failure` that cannot be retried
+**What failed:** the very first push to the brand-new repository produced CI run `startup_failure` after 0s, with zero jobs, empty logs and no annotations; `gh run rerun` was refused ("This workflow run cannot be retried").
+**Root cause:** `startup_failure` means the run never created jobs (infrastructure/validation error before execution). The workflow file itself was verified clean (`actionlint` exit 0; GitHub listed the workflow as `active`), matching the documented first-push infrastructure failure mode; because no jobs exist, GitHub refuses retries — only a fresh run (new push) can re-trigger CI.
+**Correction:** recorded the observed state honestly, then pushed a documentation commit to trigger a fresh run and recorded the new result.
+**Prevention rule:** never treat a `startup_failure` as proof of a broken workflow without local validation (`actionlint`); trigger a fresh run by pushing, and only then record CI status. Always confirm CI results on GitHub — never assume.
