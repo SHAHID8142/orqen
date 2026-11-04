@@ -48,3 +48,8 @@ Format per [COMMUNICATION.md §2.4](COMMUNICATION.md). New entries append at the
 **Context:** `npm audit` reported 10 moderate advisories in dev-only ESLint tooling (minimatch via `@eslint/config-array`, GHSA-g3hv-75wg-m249); the offered fix downgrades ESLint to 9.x.
 **Decision:** keep ESLint 10 (current stable). Production (`--omit=dev`) dependencies are clean and `npm run audit` gates production deps. Dev-only advisories are recorded in [QA_REPORT.md](QA_REPORT.md) and reassessed each phase.
 **Consequences:** a known, bounded dev-tooling advisory is accepted consciously; revisit when eslint 10.x ships a patched dependency chain.
+
+## D-010 | 2026-11-05 | APPROVED (user-directed) — Repository made public
+**Context:** Phase 0 originally required a private repository; two CI runs on the private repo ended in `startup_failure` with zero jobs and no annotations (runs 41932865723, 41933399059). The user then explicitly instructed that the repository be made public.
+**Decision:** `SHAHID8142/orqen` is now **public** by direct user instruction, superseding the Phase 0 private requirement. No secrets existed in the repository at the time of the change (pattern scan + staged-diff review passed before the first push).
+**Consequences:** source and documentation are publicly visible; CI runs on public repositories are free and unrestricted, which may also resolve the Actions startup failures if the cause was private-repo Actions restrictions. Security posture is unchanged: never commit credentials, tokens, or local data.

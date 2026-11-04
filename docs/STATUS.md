@@ -17,7 +17,7 @@ Single source of truth for "where is the project right now". Updated at every me
 
 | Micro-task | Status |
 | --- | --- |
-| A — Private GitHub repository | Done (verified PRIVATE, owner `SHAHID8142`) |
+| A — Private GitHub repository | Done (created as PRIVATE; changed to PUBLIC on 2026-11-05 by explicit user instruction, see D-010) |
 | B — Runnable desktop foundation | Done (Tauri 2 + React + TS; launch verified locally) |
 | C — Modular project structure | Done (boundaries in [ARCHITECTURE.md §Module boundaries](ARCHITECTURE.md)) |
 | D — Project documentation | Done (11 docs, cross-referenced, one authoritative source per rule) |

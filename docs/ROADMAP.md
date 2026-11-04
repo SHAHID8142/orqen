@@ -8,7 +8,7 @@ Priorities: **P0** = must exist for the product to function; **P1** = core value
 Private GitHub repository; runnable Tauri 2 + React + TypeScript desktop shell; modular structure; full documentation set; quality gates (ESLint, TS strict, Vitest, cargo fmt/clippy); CI; verified foundation screen with real IPC.
 
 **Acceptance criteria:**
-- [x] Private repo `SHAHID8142/orqen` with clean history on `main`.
+- [x] Repository `SHAHID8142/orqen` (created private; made public 2026-11-05 by explicit user instruction — D-010) with clean history on `main`.
 - [x] App launches on macOS; React interface renders; no simulated statuses.
 - [x] `npm run verify` (lint, typecheck, tests, build) passes; rust gates pass.
 - [x] Documentation set complete and internally consistent.
