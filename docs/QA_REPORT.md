@@ -19,7 +19,7 @@ Only observed results are recorded here — every entry lists the actual command
 | 11 | Repository visibility | `gh repo view SHAHID8142/orqen --json visibility` | Initially PASS — `PRIVATE`; changed to `PUBLIC` on 2026-11-05 by explicit user instruction (D-010), after a secret scan confirmed no credentials in the repository |
 | 12 | Secret scan before push | grep-based scan of tracked files + `git diff --cached` review | PASS — no credentials/tokens/keys found |
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
-| 14 | CI run on GitHub | GitHub Actions `ci.yml` on first push | IN PROGRESS — first push (926b3be) produced a `startup_failure` with 0 jobs and no annotations (run 41932865723). The workflow file itself validates clean (`actionlint` exit 0; GitHub shows it `active`), so this matches the documented new-repository first-run infrastructure failure mode. A fresh run was triggered by the following commit; result recorded here once observed. |
+| 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — account billing lock.** Observed chain: runs on the private repo (41932865723, 41933399059) ended `startup_failure` at 0s with zero jobs and no annotations. After the user directed the repository to public (D-010), run 41933672348 created both jobs but refused to start them with the annotation: *"The job was not started because your account is locked due to a billing issue."* The workflow file itself is valid: `actionlint` exit 0, GitHub lists it `active`, and jobs were instantiated. CI cannot be confirmed until the account's billing issue is resolved (github.com/settings/billing), after which any push re-triggers the workflow. |
 
 ## CI verification (GitHub Actions, ubuntu-latest)
 
@@ -35,4 +35,6 @@ To be filled with the observed first-run results after push (frontend job: lint 
 
 ## Outstanding issues
 
-None open beyond the accepted items above.
+1. **CI BLOCKED (user action required):** the GitHub account is locked due to a billing issue, which prevents all Actions runs. Resolution: settle the billing matter at [github.com/settings/billing](https://github.com/settings/billing); any subsequent push re-triggers CI. Everything CI would verify (lint, typecheck, tests, build, fmt, clippy, check) has passed locally on macOS arm64 — rows 1–10 above.
+
+## Known accepted issues

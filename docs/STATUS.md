@@ -8,9 +8,9 @@ Single source of truth for "where is the project right now". Updated at every me
 | --- | --- |
 | **Phase** | 0 — Project Foundation & Bootstrap |
 | **Feature** | Phase 0 bootstrap (repository, app shell, docs, gates, CI) |
-| **Progress** | All Phase 0 micro-tasks implemented and locally verified; CI run pending first push |
-| **Blockers** | None open. Known accepted advisory: dev-only npm audit findings (D-009). |
-| **Next review checkpoint** | Manual review of the Phase 0 completion report (approval gate per [GOVERNANCE.md §Execution controls](GOVERNANCE.md)) |
+| **Progress** | All Phase 0 micro-tasks implemented; all local gates pass; **CI blocked by GitHub account billing lock** (user action required) |
+| **Blockers** | **GitHub account locked due to a billing issue** — Actions jobs are refused ("The job was not started because your account is locked due to a billing issue", run 41933672348). Resolve at github.com/settings/billing, then any push re-triggers CI. |
+| **Next review checkpoint** | Manual review of the Phase 0 completion report + resolution of the GitHub billing blocker |
 | **Next phase (after approval)** | Phase 1 — Workspace Shell & Navigation ([ROADMAP.md](ROADMAP.md)) |
 
 ## Phase 0 progress detail
@@ -23,8 +23,8 @@ Single source of truth for "where is the project right now". Updated at every me
 | D — Project documentation | Done (11 docs, cross-referenced, one authoritative source per rule) |
 | E — Universal agent governance | Done ([GOVERNANCE.md](GOVERNANCE.md)) |
 | F — Code quality & security | Done (gates pass; least-privilege capabilities; CSP) |
-| G — GitHub Actions CI | Done (workflow committed; success to be confirmed on first push) |
-| H — Final verification | Done locally; CI confirmation tracked in QA_REPORT.md |
+| G — GitHub Actions CI | Workflow authored and validated (`actionlint` clean, GitHub-listed active, jobs instantiate) — runs blocked by the account billing lock |
+| H — Final verification | Done locally; CI confirmation BLOCKED on billing (see QA_REPORT row 14) |
 
 ## Open items carried forward
 
@@ -35,3 +35,4 @@ Single source of truth for "where is the project right now". Updated at every me
 ## Recent history
 
 - **2026-11-05** — Phase 0 implemented: repository created, foundation app built, docs + governance written, quality gates configured, CI workflow authored, all local gates passing.
+- **2026-11-05** — CI runs investigated: `startup_failure` ×2 (private repo), then after user-directed change to public (D-010), jobs created but refused — GitHub account billing lock identified as the blocker (QA_REPORT row 14).
