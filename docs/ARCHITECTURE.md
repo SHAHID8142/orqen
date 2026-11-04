@@ -70,7 +70,7 @@ Least-privilege posture (Phase 0): capabilities contain `core:default` only; CSP
 3. Rust command validates input again → returns `CommandResult<T>` or a serialized `CommandErrorPayload` (`{kind, message}`).
 4. Wrapper resolves typed payload or normalizes the rejection to `CommandErrorPayload`; the UI renders the real outcome (loading / success / error).
 
-All cross-boundary payloads use camelCase JSON; their TypeScript mirrors live in `src/types/` and must change in the same commit as the Rust struct.
+All cross-boundary payloads use camelCase JSON; their TypeScript mirrors live in `src/types/` and must change in the same commit as the Rust struct. String length limits on user input count Unicode scalar values on both sides ([DECISIONS.md](DECISIONS.md) D-012) — never bytes or UTF-16 units.
 
 ## 5. Error handling conventions
 

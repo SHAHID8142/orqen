@@ -45,3 +45,15 @@ Only entries with a validated root cause and an applied correction belong here. 
 **Root cause:** `startup_failure` means the run never created jobs (infrastructure/validation error before execution). The workflow file itself was verified clean (`actionlint` exit 0; GitHub listed the workflow as `active`), matching the documented first-push infrastructure failure mode; because no jobs exist, GitHub refuses retries — only a fresh run (new push) can re-trigger CI.
 **Correction:** recorded the observed state honestly, then pushed a documentation commit to trigger a fresh run and recorded the new result.
 **Prevention rule:** never treat a `startup_failure` as proof of a broken workflow without local validation (`actionlint`); trigger a fresh run by pushing, and only then record CI status. Always confirm CI results on GitHub — never assume.
+
+## L-008 | 2026-11-05 | JavaScript `String.length` counts UTF-16 units, not characters
+**What failed:** a Unicode regression test asserted `"🙂".repeat(150).length === 150` (comment claiming "UTF-16 units: 1 per 🙂"); the test failed with actual value **300** — "🙂" (U+1F642) is a surrogate pair, 2 UTF-16 units.
+**Root cause:** conflated "character" with UTF-16 code units while writing the test for the code-point length policy (D-012); the same confusion was the root cause of the original frontend/backend validation inconsistency (`.length` UTF-16 vs `.len()` UTF-8 bytes).
+**Correction:** test rewritten to assert both facts explicitly — `message.length === 300` (UTF-16 units) and `[...message].length === 150` (code points, the shared policy) — making the old-vs-new divergence visible in the regression suite.
+**Prevention rule:** in this codebase, user-input length limits always use code-point counting (`[...value].length` in TS, `chars().count()` in Rust); never assert on `.length` for non-BMP strings without noting it counts UTF-16 units.
+
+## L-009 | 2026-11-05 | Mocked IPC tests must not assume the echo payload
+**What failed:** two Unicode tests asserted `echoPing("  বাংলা…  ")` resolves to the trimmed Bangla text, but they failed with `"ping"` — the shared `beforeEach` mock resolves every `invoke` with the literal `"ping"`.
+**Root cause:** the test mocked the transport, then implicitly assumed the mock would mirror command semantics (echo) that only the real backend implements.
+**Correction:** tests that assert echoed content set `mockResolvedValueOnce(<expected>)` explicitly; transport-only tests keep the shared default.
+**Prevention rule:** a test may assert on a mock's response only for values that test itself arranged; every assertion must trace to either the system under test or an explicitly configured mock value.

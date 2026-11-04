@@ -40,6 +40,7 @@ This file is **authoritative** for every AI coding agent (human-supervised or au
 - **No speculative code**: no empty services, fake implementations, placeholder interfaces, or simulated statuses. Every committed line must do real work ([docs/ARCHITECTURE.md §Module boundaries](docs/ARCHITECTURE.md)).
 - **UI truthfulness**: the UI may only display states that come from real data. Loading, error, and success states must reflect actual outcomes.
 - **Error handling**: frontend IPC errors are normalized through `src/lib/ipc`; Rust commands return `CommandResult<T>` from `src-tauri/src/error.rs`. Never swallow errors silently.
+- **String length limits** on user-supplied input count **Unicode scalar values (code points)** on both sides of the IPC boundary (Rust `chars().count()`, TS `[...value].length` — never `.len()` bytes or `.length` UTF-16 units). Rationale and tests: [DECISIONS.md](docs/DECISIONS.md) D-012.
 
 ## 5. Testing requirements
 

@@ -55,7 +55,7 @@ The first `tauri dev` compiles the Rust workspace and takes several minutes; sub
 ## Supported platforms
 
 - **macOS** — primary development platform (Apple silicon and Intel).
-- **Windows** — supported by the same codebase; CI currently verifies Rust checks on Linux and frontend gates on Linux. Windows packaging is verified locally and documented per release (see [docs/QA_REPORT.md](docs/QA_REPORT.md)).
+- **Windows** — supported by the same codebase; the CI workflow is configured to verify frontend gates and Rust checks on Linux, but **GitHub Actions execution is currently blocked externally** by an account-level billing restriction (see [docs/QA_REPORT.md](docs/QA_REPORT.md)) — all gates are verified locally per release instead. Windows packaging verification is planned per release and documented in [docs/QA_REPORT.md](docs/QA_REPORT.md).
 
 ## Project structure
 
@@ -99,6 +99,7 @@ Module boundaries and planned modules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 - No agent integration, chat interface, orchestration, or persistence — these are later phases ([docs/ROADMAP.md](docs/ROADMAP.md)).
 - The foundation screen reports only real runtime data (app name/version/platform, IPC round trip); if the backend is unavailable it shows an error state.
 - CI does not run a Windows job yet; Windows behavior is documented, not machine-verified in CI.
+- GitHub Actions execution is blocked by an external account-level billing restriction; CI has not yet produced a successful run (status and rerun path: [docs/QA_REPORT.md](docs/QA_REPORT.md)).
 
 ## Security posture
 

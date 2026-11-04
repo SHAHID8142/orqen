@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger (Actions tab → CI → Run workflow) so CI can be re-run
+  # without a new push once GitHub permits Actions execution again.
+  workflow_dispatch:
 
 # Least privilege: jobs only need to read the repository.
 permissions:
