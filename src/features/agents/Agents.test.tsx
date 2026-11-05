@@ -1,0 +1,308 @@
+/**
+ * Agents surface tests against fake IPC: registry loading, discovery and
+ * verification states, Main Agent preference wiring, and truthfulness.
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import "@testing-library/jest-dom/vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { AgentsProvider } from "../../lib/agents/AgentsContext";
+import { createAgentsStore, type AgentsIpc } from "../../lib/agents/store";
+import { SettingsProvider } from "../../lib/settings/SettingsContext";
+import { createSettingsStore, type SettingsIpc } from "../../lib/settings/store";
+import Agents from "./Agents";
+import type { AgentRecord } from "../../types/agents";
+
+function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return {
+    id: "codex",
+    displayName: "OpenAI Codex CLI",
+    provider: "OpenAI",
+    adapter: "cli",
+    executableName: "codex",
+    capabilities: {
+      discovery: true,
+      verification: true,
+      execution: false,
+      orchestration: false,
+    },
+    discovery: { status: "not_checked" },
+    verification: null,
+    checkedAt: null,
+    ...overrides,
+  };
+}
+
+function makeAgentsIpc(overrides: Partial<AgentsIpc> = {}): AgentsIpc & {
+  load: ReturnType<typeof vi.fn>;
+  discover: ReturnType<typeof vi.fn>;
+  verify: ReturnType<typeof vi.fn>;
+} {
+  return {
+    load: vi
+      .fn()
+      .mockResolvedValue([
+        agentRecord(),
+        agentRecord({
+          id: "claude-code",
+          displayName: "Claude Code",
+          provider: "Anthropic",
+          executableName: "claude",
+        }),
+      ]),
+    discover: vi.fn(),
+    verify: vi.fn(),
+    ...overrides,
+  } as never;
+}
+
+function makeSettingsIpc(overrides: Partial<SettingsIpc> = {}): SettingsIpc {
+  return {
+    load: vi.fn().mockResolvedValue({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: null,
+    }),
+    update: vi.fn(),
+    setMainAgent: vi.fn().mockImplementation(async (agentId) => ({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: agentId,
+    })),
+    ...overrides,
+  } as never;
+}
+
+function renderAgents(agentsIpc = makeAgentsIpc(), settingsIpc = makeSettingsIpc()) {
+  const agentsStore = createAgentsStore(agentsIpc);
+  const settingsStore = createSettingsStore(settingsIpc);
+  render(
+    <AgentsProvider store={agentsStore}>
+      <SettingsProvider store={settingsStore}>
+        <Agents />
+      </SettingsProvider>
+    </AgentsProvider>,
+  );
+  return { agentsStore, settingsStore, agentsIpc, settingsIpc };
+}
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("Agents surface — persistence states", () => {
+  it("shows a loading state before the registry arrives", () => {
+    renderAgents();
+    expect(screen.getByTestId("agents-loading")).toBeInTheDocument();
+  });
+
+  it("shows an error card with retry when loading fails", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.load.mockRejectedValueOnce({ kind: "storage", message: "db unavailable" });
+    const { agentsStore } = renderAgents(agentsIpc);
+    void agentsStore.load();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agents-error")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("db unavailable");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByRole("article", { name: "OpenAI Codex CLI" })).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Agents surface — registry display", () => {
+  it("shows both registered agents with not-checked status and the honesty note", async () => {
+    const { agentsStore } = renderAgents();
+    await agentsStore.load();
+    await waitFor(() => {
+      expect(screen.getByRole("article", { name: "OpenAI Codex CLI" })).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("article", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.getAllByText("Not checked")).toHaveLength(2);
+    expect(
+      screen.getByText(/Agent execution and orchestration will be available/i),
+    ).toBeInTheDocument();
+    // Capability truthfulness: no execution claims anywhere.
+    expect(screen.queryByText(/execution available/i)).not.toBeInTheDocument();
+  });
+
+  it("shows found state with the executable path after discovery", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.discover.mockResolvedValue(
+      agentRecord({ discovery: { status: "found", path: "/usr/local/bin/codex" }, checkedAt: "2026-01-01T00:00:00Z" }),
+    );
+    const { agentsStore } = renderAgents(agentsIpc);
+    await agentsStore.load();
+
+    const card = screen.getByRole("article", { name: "OpenAI Codex CLI" });
+    fireEvent.click(within(card).getByRole("button", { name: "Check availability" }));
+    await waitFor(() => {
+      expect(within(card).getByText("Executable found")).toBeInTheDocument();
+    });
+    expect(within(card).getByText("/usr/local/bin/codex")).toBeInTheDocument();
+    expect(within(card).getByText(/Last checked/)).toBeInTheDocument();
+  });
+
+  it("shows not-found truthfully and disables Verify CLI", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.discover.mockResolvedValue(agentRecord({ discovery: { status: "not_found" } }));
+    const { agentsStore } = renderAgents(agentsIpc);
+    await agentsStore.load();
+
+    const card = screen.getByRole("article", { name: "OpenAI Codex CLI" });
+    fireEvent.click(within(card).getByRole("button", { name: "Check availability" }));
+    await waitFor(() => {
+      expect(within(card).getByText("Not found")).toBeInTheDocument();
+    });
+    expect(within(card).getByRole("button", { name: "Verify CLI" })).toBeDisabled();
+  });
+
+  it("shows the verified version after an explicit Verify CLI action", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.discover.mockResolvedValue(
+      agentRecord({ discovery: { status: "found", path: "/usr/local/bin/codex" } }),
+    );
+    agentsIpc.verify.mockResolvedValue(
+      agentRecord({
+        discovery: { status: "found", path: "/usr/local/bin/codex" },
+        verification: { status: "verified", version: "codex-cli 0.42.0" },
+        checkedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    const { agentsStore } = renderAgents(agentsIpc);
+    await agentsStore.load();
+
+    await agentsStore.discover("codex");
+    const card = screen.getByRole("article", { name: "OpenAI Codex CLI" });
+    fireEvent.click(within(card).getByRole("button", { name: "Verify CLI" }));
+    await waitFor(() => {
+      expect(within(card).getByText("codex-cli 0.42.0")).toBeInTheDocument();
+    });
+    expect(agentsIpc.verify).toHaveBeenCalledWith("codex");
+  });
+
+  it("surfaces failed verification without claiming success", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.discover.mockResolvedValue(
+      agentRecord({ discovery: { status: "found", path: "/usr/local/bin/codex" } }),
+    );
+    agentsIpc.verify.mockResolvedValue(
+      agentRecord({
+        discovery: { status: "found", path: "/usr/local/bin/codex" },
+        verification: { status: "failed", message: "verification timed out after 10s" },
+      }),
+    );
+    const { agentsStore } = renderAgents(agentsIpc);
+    await agentsStore.load();
+    await agentsStore.discover("codex");
+
+    const card = screen.getByRole("article", { name: "OpenAI Codex CLI" });
+    fireEvent.click(within(card).getByRole("button", { name: "Verify CLI" }));
+    await waitFor(() => {
+      expect(within(card).getByRole("alert")).toHaveTextContent(
+        "verification timed out after 10s",
+      );
+    });
+    expect(within(card).queryByText(/codex-cli/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Agents surface — Main Agent preference", () => {
+  it("offers None plus every registered agent, defaulting to None", async () => {
+    const { agentsStore } = renderAgents();
+    await agentsStore.load();
+    const fieldset = screen.getByRole("group", { name: "Preferred Main Agent" });
+    await waitFor(() => {
+      expect(within(fieldset).getByLabelText(/^None /)).toBeInTheDocument();
+    });
+    expect(within(fieldset).getByLabelText("OpenAI Codex CLI")).not.toBeChecked();
+    expect(within(fieldset).getByLabelText("Claude Code")).not.toBeChecked();
+    expect(screen.getByText(/selecting an agent starts nothing today/i)).toBeInTheDocument();
+  });
+
+  it("saves the selected Main Agent through the settings store", async () => {
+    const settingsIpc = makeSettingsIpc();
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    await agentsStore.load();
+    await settingsStore.load();
+    await waitFor(() =>
+      expect(within(screen.getByRole("group", { name: "Preferred Main Agent" })).getByLabelText("Claude Code")).toBeEnabled(),
+    );
+
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "Preferred Main Agent" })).getByLabelText("Claude Code"),
+    );
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("group", { name: "Preferred Main Agent" })).getByLabelText(
+          "Claude Code",
+        ),
+      ).toBeChecked();
+    });
+    expect(settingsIpc.setMainAgent).toHaveBeenCalledWith("claude-code");
+    expect(settingsStore.getState().data.mainAgentId).toBe("claude-code");
+  });
+
+  it("marks an unavailable preferred agent while preserving the preference", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.load.mockResolvedValue([
+      agentRecord({ id: "codex", discovery: { status: "not_found" } }),
+      agentRecord({
+        id: "claude-code",
+        displayName: "Claude Code",
+        provider: "Anthropic",
+        executableName: "claude",
+        discovery: { status: "found", path: "/usr/local/bin/claude" },
+      }),
+    ]);
+    const settingsIpc = makeSettingsIpc({
+      load: vi.fn().mockResolvedValue({
+        approvalMode: "manual",
+        maxRetry: 3,
+        telegramNotifications: true,
+        mainAgentId: "codex",
+      }),
+    });
+    const agentsStore = createAgentsStore(agentsIpc);
+    const settingsStore = createSettingsStore(settingsIpc);
+    render(
+      <AgentsProvider store={agentsStore}>
+        <SettingsProvider store={settingsStore}>
+          <Agents />
+        </SettingsProvider>
+      </AgentsProvider>,
+    );
+    await Promise.all([agentsStore.load(), settingsStore.load()]);
+    const fieldset = screen.getByRole("group", { name: "Preferred Main Agent" });
+    await waitFor(() => {
+      expect(within(fieldset).getByLabelText(/OpenAI Codex CLI/)).toBeChecked();
+    });
+    expect(within(fieldset).getByText(/executable currently unavailable/i)).toBeInTheDocument();
+  });
+
+  it("clears the preference with the None option", async () => {
+    const settingsIpc = makeSettingsIpc({
+      load: vi.fn().mockResolvedValue({
+        approvalMode: "manual",
+        maxRetry: 3,
+        telegramNotifications: true,
+        mainAgentId: "codex",
+      }),
+    });
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    await Promise.all([agentsStore.load(), settingsStore.load()]);
+    await waitFor(() => expect(screen.getByLabelText(/^None /)).toBeEnabled());
+
+    fireEvent.click(screen.getByLabelText(/^None /));
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^None /)).toBeChecked();
+    });
+    expect(settingsIpc.setMainAgent).toHaveBeenCalledWith(null);
+  });
+});

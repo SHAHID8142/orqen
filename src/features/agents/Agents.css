@@ -1,0 +1,143 @@
+/* Agents surface — registry cards and Main Agent preference.
+   Shared .panel / .notice-card / .surface-lead patterns live in global.css. */
+
+.agents h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.agent-list {
+  margin-top: 20px;
+  display: grid;
+  gap: 16px;
+}
+
+.agent-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.agent-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.agent-name {
+  margin: 0;
+  font-size: 16px;
+}
+
+.agent-provider {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.chip {
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.chip-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+}
+
+.chip-miss {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: var(--err-border);
+}
+
+.chip-checking {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+
+.agent-details {
+  margin: 12px 0 0;
+  display: grid;
+  gap: 6px;
+}
+
+.agent-detail {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.agent-detail dt {
+  color: var(--muted);
+  font-size: 12.5px;
+  min-width: 120px;
+}
+
+.agent-detail dd {
+  margin: 0;
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.agent-error {
+  margin: 12px 0 0;
+  color: var(--err);
+  background: var(--err-soft);
+  border: 1px solid var(--err-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13.5px;
+}
+
+.agent-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.agent-actions button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.agent-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.agent-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.agent-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.warn-note {
+  color: var(--warn);
+}
+
+@media (max-width: 640px) {
+  .agent-card-header {
+    flex-direction: column;
+  }
+}

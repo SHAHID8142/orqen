@@ -99,3 +99,9 @@ Only entries with a validated root cause and an applied correction belong here. 
 **Root cause:** Vitest transforms TypeScript without typechecking; property renames that would fail `tsc` pass silently until the typecheck gate runs — and mid-remediation runs that stopped at the lint stage never reached it.
 **Correction:** replaced the stale references with the single `pendingAction` flag; the final `npm run verify` (lint → typecheck → test) passed cleanly.
 **Prevention rule:** never treat a green Vitest run as type safety on a TypeScript change — `npm run verify` runs the typecheck before tests precisely for this; when renaming store state fields, grep the whole `src/` tree for the old names in the same change.
+
+## L-017 | 2026-11-06 | A bounded reader that stops early SIGPIPE-kills the writing child
+**What failed:** the CLI verification probe read child output through a thread whose `take(64 KiB)` ended early — dropping the read end of the pipe. A test child writing far more than the cap died with SIGPIPE (`code: -1`) before printing its version line, so verification reported a confusing nonzero exit instead of a usable result.
+**Root cause:** "bounded read" was implemented as "stop reading at the cap" — with pipes, closing the reader end converts the writer's next write into SIGPIPE.
+**Correction:** the reader now drains to EOF while keeping only the first 64 KiB (remainder discarded) — the child always completes, memory stays bounded, and the caught test pinned the behavior (version printed before the flood is preserved).
+**Prevention rule:** when bounding child-process output, drain the pipe to EOF and cap only what you retain; verify flooding, hanging, and normal children with dedicated tests.

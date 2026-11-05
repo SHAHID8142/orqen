@@ -22,6 +22,8 @@ export interface Settings {
   approvalMode: "manual" | "autonomous";
   maxRetry: number;
   telegramNotifications: boolean;
+  /** Saved Main Agent preference (registry id) — a preference only. */
+  mainAgentId: string | null;
 }
 
 /** Payload for settings updates. */

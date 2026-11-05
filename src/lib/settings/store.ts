@@ -5,11 +5,13 @@
 import type { CommandErrorPayload } from "../../types/app";
 import type { Settings, SettingsInput, SettingsState } from "./types";
 import { MAX_RETRY_LIMIT, MIN_RETRY } from "./types";
+import { createSerialQueue, type SerialQueue } from "../serialQueue";
 
 /** IPC surface of the store (matches `lib/ipc/settings.ts`). */
 export interface SettingsIpc {
   load: () => Promise<Settings>;
   update: (input: SettingsInput) => Promise<Settings>;
+  setMainAgent: (agentId: string | null) => Promise<Settings>;
 }
 
 export interface SettingsStore {
@@ -19,13 +21,21 @@ export interface SettingsStore {
   load: () => Promise<void>;
   /** Updates settings and applies the stored result. */
   update: (input: SettingsInput) => Promise<void>;
+  /** Saves (or clears) the Main Agent preference. */
+  setMainAgent: (agentId: string | null) => Promise<void>;
 }
 
 /** Creates a store bound to the given IPC surface. */
 export function createSettingsStore(ipc: SettingsIpc): SettingsStore {
+  const queue: SerialQueue = createSerialQueue();
   let state: SettingsState = {
     phase: "loading",
-    data: { approvalMode: "manual", maxRetry: 3, telegramNotifications: true },
+    data: {
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: null,
+    },
     loadError: null,
     actionError: null,
     saving: false,
@@ -59,6 +69,7 @@ export function createSettingsStore(ipc: SettingsIpc): SettingsStore {
   }
 
   async function update(input: SettingsInput): Promise<void> {
+    return queue.run(async () => {
     if (state.saving || state.phase !== "ready") return;
     if (input.approvalMode !== "manual" && input.approvalMode !== "autonomous") {
       setState({
@@ -86,6 +97,20 @@ export function createSettingsStore(ipc: SettingsIpc): SettingsStore {
     } catch (error) {
       setState({ saving: false, actionError: normalizeError(error) });
     }
+    });
+  }
+
+  async function setMainAgent(agentId: string | null): Promise<void> {
+    return queue.run(async () => {
+      if (state.saving || state.phase !== "ready") return;
+      setState({ saving: true, actionError: null });
+      try {
+        const stored = await ipc.setMainAgent(agentId);
+        setState({ saving: false, data: stored });
+      } catch (error) {
+        setState({ saving: false, actionError: normalizeError(error) });
+      }
+    });
   }
 
   return {
@@ -96,6 +121,7 @@ export function createSettingsStore(ipc: SettingsIpc): SettingsStore {
     },
     load,
     update,
+    setMainAgent,
   };
 }
 

@@ -35,6 +35,10 @@ pub const MIGRATIONS: &[&str] = &[
         selected_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL
     );
     INSERT INTO settings (id) VALUES (1);",
+    // v2 — Phase 3: preferred Main Agent (a saved preference referencing
+    // a registry definition id; validity is enforced in Rust against the
+    // built-in definitions, so no foreign key to a dynamic table).
+    "ALTER TABLE settings ADD COLUMN main_agent_id TEXT;",
 ];
 
 /// Reads the currently recorded schema version.
@@ -141,7 +145,10 @@ mod tests {
     fn applies_migrations_and_records_version() {
         let mut conn = open_mem();
         run_migrations_with(&mut conn, MIGRATIONS).expect("migrations apply");
-        assert_eq!(current_version(&conn).expect("version"), 1);
+        assert_eq!(
+            current_version(&conn).expect("version"),
+            MIGRATIONS.len() as u32
+        );
         // Tables exist.
         let projects: i64 = conn
             .query_row(
@@ -168,7 +175,10 @@ mod tests {
         )
         .expect("seed project");
         run_migrations_with(&mut conn, MIGRATIONS).expect("second run");
-        assert_eq!(current_version(&conn).expect("version"), 1);
+        assert_eq!(
+            current_version(&conn).expect("version"),
+            MIGRATIONS.len() as u32
+        );
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
             .expect("project count");
@@ -180,13 +190,18 @@ mod tests {
         let mut conn = open_mem();
         run_migrations_with(&mut conn, MIGRATIONS).expect("v1 applies");
 
-        let bad_v2 =
+        let bad_next =
             "CREATE TABLE tasks (id TEXT PRIMARY KEY); INSERT INTO missing_table (x) VALUES (1);";
-        let result = run_migrations_with(&mut conn, &[MIGRATIONS[0], bad_v2]);
+        let mut all: Vec<&str> = MIGRATIONS.to_vec();
+        all.push(bad_next);
+        let result = run_migrations_with(&mut conn, &all);
         assert!(result.is_err(), "broken migration must fail");
 
         // Version unchanged and no partial schema from the failed migration.
-        assert_eq!(current_version(&conn).expect("version"), 1);
+        assert_eq!(
+            current_version(&conn).expect("version"),
+            MIGRATIONS.len() as u32
+        );
         let bad_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -219,7 +234,10 @@ mod tests {
                 })
                 .expect("project survives reopen");
             assert_eq!(name, "Survivor");
-            assert_eq!(current_version(&conn).expect("version"), 1);
+            assert_eq!(
+                current_version(&conn).expect("version"),
+                MIGRATIONS.len() as u32
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

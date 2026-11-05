@@ -19,6 +19,7 @@
 import type { CommandErrorPayload } from "../../types/app";
 import type { WorkspaceSnapshot } from "./types";
 import { validateProjectName, type WorkspaceState } from "./types";
+import { createSerialQueue, type SerialQueue } from "../serialQueue";
 
 /** IPC surface of the store (matches `lib/ipc/workspace.ts`). */
 export interface WorkspaceIpc {
@@ -50,6 +51,7 @@ export interface WorkspaceStore {
 
 /** Creates a store bound to the given IPC surface. */
 export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
+  const queue: SerialQueue = createSerialQueue();
   let state: WorkspaceState = {
     phase: "loading",
     data: { projects: [], selectedProjectId: null },
@@ -58,17 +60,6 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
     pendingAction: { kind: "load" },
   };
   const listeners = new Set<() => void>();
-
-  // Serial operation queue: strictly ordered, at most one in flight.
-  let queue: Promise<unknown> = Promise.resolve();
-  function enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const run = queue.then(task, task);
-    queue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
 
   function setState(next: Partial<WorkspaceState>) {
     state = { ...state, ...next };
@@ -86,7 +77,7 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
   }
 
   async function load(): Promise<void> {
-    return enqueue(async () => {
+    return queue.run(async () => {
       const hadData = state.phase === "ready";
       setState({ phase: "loading", loadError: null, pendingAction: { kind: "load" } });
       try {
@@ -112,7 +103,7 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
   }
 
   async function create(rawName: string): Promise<void> {
-    return enqueue(async () => {
+    return queue.run(async () => {
       // Mutations require the persisted snapshot; without it there is
       // nothing safe to mutate against.
       if (state.phase !== "ready") {
@@ -142,7 +133,7 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
   }
 
   async function select(id: string): Promise<void> {
-    return enqueue(async () => {
+    return queue.run(async () => {
       if (state.phase !== "ready") {
         setState({
           actionError: {
@@ -165,7 +156,7 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
   }
 
   async function remove(id: string): Promise<void> {
-    return enqueue(async () => {
+    return queue.run(async () => {
       if (state.phase !== "ready") {
         setState({
           actionError: {

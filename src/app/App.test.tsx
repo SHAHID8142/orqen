@@ -36,6 +36,7 @@ function installBackendSimulation(options: {
     approvalMode: "manual" as "manual" | "autonomous",
     maxRetry: 3,
     telegramNotifications: true,
+    mainAgentId: null as string | null,
   };
   const snap = (): WorkspaceSnapshot => ({
     projects: projects.map((p) => ({ ...p })),
@@ -78,6 +79,60 @@ function installBackendSimulation(options: {
         projects.splice(index, 1);
         if (selectedProjectId === id) selectedProjectId = null;
         return snap();
+      }
+      case "list_agents":
+        return [
+          {
+            id: "codex",
+            displayName: "OpenAI Codex CLI",
+            provider: "OpenAI",
+            adapter: "cli",
+            executableName: "codex",
+            capabilities: { discovery: true, verification: true, execution: false, orchestration: false },
+            discovery: { status: "not_checked" },
+            verification: null,
+            checkedAt: null,
+          },
+          {
+            id: "claude-code",
+            displayName: "Claude Code",
+            provider: "Anthropic",
+            adapter: "cli",
+            executableName: "claude",
+            capabilities: { discovery: true, verification: true, execution: false, orchestration: false },
+            discovery: { status: "not_checked" },
+            verification: null,
+            checkedAt: null,
+          },
+        ];
+      case "discover_agent":
+        return {
+          id: String(payload.id),
+          displayName: String(payload.id) === "codex" ? "OpenAI Codex CLI" : "Claude Code",
+          provider: String(payload.id) === "codex" ? "OpenAI" : "Anthropic",
+          adapter: "cli",
+          executableName: String(payload.id) === "codex" ? "codex" : "claude",
+          capabilities: { discovery: true, verification: true, execution: false, orchestration: false },
+          discovery: { status: "found", path: `/usr/local/bin/${String(payload.id)}` },
+          verification: null,
+          checkedAt: "2026-01-01T00:00:00Z",
+        };
+      case "verify_agent":
+        return {
+          id: String(payload.id),
+          displayName: String(payload.id) === "codex" ? "OpenAI Codex CLI" : "Claude Code",
+          provider: String(payload.id) === "codex" ? "OpenAI" : "Anthropic",
+          adapter: "cli",
+          executableName: String(payload.id) === "codex" ? "codex" : "claude",
+          capabilities: { discovery: true, verification: true, execution: false, orchestration: false },
+          discovery: { status: "found", path: `/usr/local/bin/${String(payload.id)}` },
+          verification: { status: "verified", version: "test 1.0.0" },
+          checkedAt: "2026-01-01T00:00:00Z",
+        };
+      case "set_main_agent": {
+        const agentId = (payload as { agentId: string | null }).agentId ?? null;
+        settings.mainAgentId = agentId;
+        return { ...settings };
       }
       case "load_settings":
         return { ...settings };
@@ -168,7 +223,7 @@ describe("App shell navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("marks the active surface with aria-current and switches views without reloads", () => {
+  it("marks the active surface with aria-current and switches views without reloads", async () => {
     renderApp();
     const hrefBefore = window.location.href;
 
@@ -193,9 +248,15 @@ describe("App shell navigation", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "Agents" }),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("agents-not-installed")).toHaveTextContent(
-      /not installed yet/i,
-    );
+    await waitFor(() => {
+      expect(screen.getByRole("article", { name: "OpenAI Codex CLI" })).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("article", { name: "Claude Code" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Agent execution and orchestration will be available/i),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Workflows" }));
     expect(

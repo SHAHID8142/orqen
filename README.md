@@ -94,14 +94,16 @@ Module boundaries and planned modules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 | [docs/STATUS.md](docs/STATUS.md) | Current phase and progress |
 | [docs/QA_REPORT.md](docs/QA_REPORT.md) | Real verification results |
 
-## Current limitations (Phase 2)
+## Current limitations (Phase 3 — registry milestone)
 
-- No agent integration, chat interface, or orchestration — these are later phases ([docs/ROADMAP.md](docs/ROADMAP.md)).
+- The Agent Registry can **discover** installed CLIs (Codex, Claude Code), **verify** their version via a controlled `--version` probe, and **persist your preferred Main Agent**. It cannot run agents yet — agent execution and orchestration are future phases ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+- Discovery means "executable found on PATH" — it says nothing about authentication, connectivity, or subscription status.
+- No chat interface yet — these are later phases.
 - **Persistence is live**: projects, the selected project, and settings are stored in SQLite at the OS app-data directory (`~/Library/Application Support/io.github.shahid8142.orqen/` on macOS) via the Rust core — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the connection strategy, migrations, and backup notes (WAL side files).
 - Settings for Telegram notifications and autonomous execution are saved preferences only — neither integration is operational.
 - Agents and Workflows surfaces document planned capabilities; they contain no fake statuses or simulated agents.
 - The Overview surface reports only real runtime data (app name/version/platform, IPC round trip); if the backend is unavailable it shows an error state.
-- If the database is unreadable, Orqen fails safely: it never deletes or resets data and shows recovery guidance in the UI.
+- If the database is unreadable, Orqen fails safely: it never deletes or resets data and shows recovery guidance in the UI. Databases written by a newer Orqen version are rejected untouched.
 - CI does not run a Windows job yet; Windows behavior is documented, not machine-verified in CI.
 - GitHub Actions execution is blocked by an external account-level billing restriction; CI has not yet produced a successful run (status and rerun path: [docs/QA_REPORT.md](docs/QA_REPORT.md)).
 

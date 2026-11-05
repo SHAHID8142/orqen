@@ -21,6 +21,22 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 001 verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` (lint → typecheck → test → build) | PASS — exit 0; **104/104 tests** |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust tests | `cargo test` | PASS — **64/64** (60 lib incl. 24 new agent/migration tests + 4 integration incl. v1→v2 upgrade) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS — real app binary ran cleanly; **real user database upgraded v1→v2 on launch** with all Phase 2 data intact (`user_version` 2, settings preserved, `main_agent_id` NULL) |
+| 7 | Real CLI evidence | `command -v` + `claude --version` | Claude Code **is installed** (`/Users/maryamahad/.local/bin/claude`) and reports `2.1.316 (Claude Code)` — the same noninteractive probe the Rust verification layer runs. Codex **is not installed** — the real negative case the UI must show truthfully. |
+| 8 | Secret/DB scan | `git diff` + `git ls-files` | PASS — no secrets, no tracked databases, no new npm dependencies |
+| 9 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+Test-type transparency: Rust unit tests use **controlled fixture executables** (temp-dir shell scripts) for discovery and verification — no real third-party CLI is invoked in automated tests. The real Claude Code 2.1.316 evidence above comes from running the documented `--version` probe against the actually installed binary on this machine. Interactive GUI walkthrough of the Agents screen remains a manual checklist item.
+
 ## Phase 2 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

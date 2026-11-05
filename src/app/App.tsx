@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createAppAgentsStore, AgentsProvider } from "../lib/agents/AgentsContext";
 import { createAppSettingsStore, SettingsProvider } from "../lib/settings/SettingsContext";
 import type { SettingsStore } from "../lib/settings/store";
 import { createAppWorkspaceStore, WorkspaceProvider } from "../lib/workspace/WorkspaceContext";
@@ -22,24 +23,29 @@ import type { ViewId } from "./views";
 
 const defaultWorkspaceStore = createAppWorkspaceStore();
 const defaultSettingsStore = createAppSettingsStore();
+const defaultAgentsStore = createAppAgentsStore();
 
 function App({
   workspace = defaultWorkspaceStore,
   settings = defaultSettingsStore,
+  agents = defaultAgentsStore,
 }: {
   workspace?: WorkspaceStore;
   settings?: SettingsStore;
+  agents?: import("../lib/agents/store").AgentsStore;
 } = {}) {
   const [activeView, setActiveView] = useState<ViewId>("overview");
 
   useEffect(() => {
     void workspace.load();
     void settings.load();
-  }, [workspace, settings]);
+    void agents.load();
+  }, [workspace, settings, agents]);
 
   return (
     <WorkspaceProvider store={workspace}>
       <SettingsProvider store={settings}>
+        <AgentsProvider store={agents}>
         <AppShell activeView={activeView} onNavigate={setActiveView}>
           {activeView === "overview" && <Overview />}
           {activeView === "projects" && <Projects />}
@@ -47,6 +53,7 @@ function App({
           {activeView === "workflows" && <Workflows />}
           {activeView === "settings" && <SettingsSurface />}
         </AppShell>
+        </AgentsProvider>
       </SettingsProvider>
     </WorkspaceProvider>
   );

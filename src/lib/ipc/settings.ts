@@ -13,3 +13,10 @@ export async function fetchSettings(): Promise<Settings> {
 export async function updateSettingsRequest(input: SettingsInput): Promise<Settings> {
   return invoke<Settings>("update_settings", { settings: input });
 }
+
+/** Saves (or clears with `null`) the preferred Main Agent preference. */
+export async function setMainAgentRequest(
+  agentId: string | null,
+): Promise<Settings> {
+  return invoke<Settings>("set_main_agent", { agentId });
+}

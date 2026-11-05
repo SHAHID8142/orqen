@@ -186,6 +186,9 @@ function SettingsSurface() {
           type="button"
           disabled={busy}
           onClick={() => {
+            // The UPDATE statement only touches the three execution
+            // preferences — the Main Agent preference (Agents surface) is
+            // left as-is by the backend.
             void store.update({
               approvalMode: "manual",
               maxRetry: 3,

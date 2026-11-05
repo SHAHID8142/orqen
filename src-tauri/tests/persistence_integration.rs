@@ -193,3 +193,104 @@ fn concurrent_mutations_serialize_safely() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Phase 3 migration upgrade: a real Phase 2 (v1) database with project
+/// and settings data is upgraded to v2 without losing anything, and the
+/// new Main Agent preference becomes usable.
+#[test]
+fn phase2_database_upgrades_to_v2_preserving_data() {
+    use orqen_lib::commands::settings::set_main_agent_conn;
+    use orqen_lib::db::migrations;
+
+    let dir = temp_dir();
+    let db_path = dir.join(orqen_lib::db::DB_FILE_NAME);
+
+    // Build a genuine v1 database directly: only the first migration,
+    // one project, default settings — exactly what a Phase 2 install had.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("create v1 db");
+        conn.execute_batch(orqen_lib::db::migrations::MIGRATIONS[0])
+            .expect("v1 schema");
+        conn.pragma_update(None, "user_version", 1)
+            .expect("v1 version");
+        conn.execute(
+            "INSERT INTO projects (id, name, created_at) VALUES ('pre-1', 'Pre-upgrade Project', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed project");
+    }
+
+    // Upgrade: open_database applies v2 on top of the v1 database.
+    {
+        let mut conn = open_database(&dir).expect("upgrade open");
+        assert_eq!(
+            migrations::current_version(&conn).expect("version"),
+            migrations::MIGRATIONS.len() as u32,
+            "upgrade must reach the current version"
+        );
+
+        // Data written before the upgrade is still present and usable.
+        let snapshot =
+            create_project_conn(&mut conn, "Post-upgrade Project").expect("create after upgrade");
+        assert_eq!(
+            snapshot.projects.len(),
+            2,
+            "pre-upgrade project must survive"
+        );
+        let selected = snapshot
+            .projects
+            .iter()
+            .find(|p| Some(p.id.as_str()) == snapshot.selected_project_id.as_deref())
+            .expect("selection must reference a real project");
+        assert_eq!(selected.name, "Post-upgrade Project");
+
+        // The new preference column is usable and persists.
+        let stored = set_main_agent_conn(&conn, Some("codex")).expect("set main agent");
+        assert_eq!(stored.main_agent_id.as_deref(), Some("codex"));
+    }
+
+    // Restart: everything survives.
+    {
+        let conn = open_database(&dir).expect("reopen after upgrade");
+        let snapshot = load_workspace_conn(&conn).expect("load");
+        assert_eq!(snapshot.projects.len(), 2);
+        assert!(
+            snapshot
+                .projects
+                .iter()
+                .any(|p| p.name == "Pre-upgrade Project"),
+            "the pre-upgrade project must survive the upgrade"
+        );
+        let settings = load_settings_conn(&conn).expect("load settings");
+        assert_eq!(settings.main_agent_id.as_deref(), Some("codex"));
+        assert_eq!(settings.max_retry, 3);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Main Agent preference lifecycle across restarts.
+#[test]
+fn main_agent_preference_survives_restart() {
+    use orqen_lib::commands::settings::{load_settings_conn, set_main_agent_conn};
+
+    let dir = temp_dir();
+    {
+        let conn = open_database(&dir).expect("open");
+        set_main_agent_conn(&conn, Some("claude-code")).expect("set");
+    }
+    {
+        let conn = open_database(&dir).expect("reopen");
+        let settings = load_settings_conn(&conn).expect("load");
+        assert_eq!(settings.main_agent_id.as_deref(), Some("claude-code"));
+
+        // Clearing the preference persists too.
+        set_main_agent_conn(&conn, None).expect("clear");
+    }
+    {
+        let conn = open_database(&dir).expect("reopen after clear");
+        let settings = load_settings_conn(&conn).expect("load");
+        assert_eq!(settings.main_agent_id, None);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

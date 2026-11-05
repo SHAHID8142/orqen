@@ -10,7 +10,22 @@ const DEFAULTS: Settings = {
   approvalMode: "manual",
   maxRetry: 3,
   telegramNotifications: true,
+  mainAgentId: null,
 };
+
+/** Deferred promise for controlling backend timing in tests. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Lets queued store operations start before mid-flight assertions. */
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function makeIpc(overrides: Partial<SettingsIpc> = {}): SettingsIpc & {
   load: ReturnType<typeof vi.fn>;
@@ -47,7 +62,12 @@ describe("settings store — loading", () => {
   });
 
   it("keeps previous valid settings when a reload fails after being ready", async () => {
-    const changed: Settings = { approvalMode: "autonomous", maxRetry: 7, telegramNotifications: false };
+    const changed: Settings = {
+      approvalMode: "autonomous",
+      maxRetry: 7,
+      telegramNotifications: false,
+      mainAgentId: null,
+    };
     const ipc = makeIpc({ load: vi.fn().mockResolvedValue(changed) });
     const store = createSettingsStore(ipc);
     await store.load();
@@ -62,7 +82,12 @@ describe("settings store — loading", () => {
 
 describe("settings store — updates", () => {
   it("applies the stored result after a successful update", async () => {
-    const stored: Settings = { approvalMode: "autonomous", maxRetry: 7, telegramNotifications: false };
+    const stored: Settings = {
+      approvalMode: "autonomous",
+      maxRetry: 7,
+      telegramNotifications: false,
+      mainAgentId: null,
+    };
     const ipc = makeIpc();
     ipc.update.mockResolvedValue(stored);
     const store = createSettingsStore(ipc);
@@ -108,22 +133,49 @@ describe("settings store — updates", () => {
     expect(store.getState().actionError?.kind).toBe("storage");
   });
 
-  it("ignores a second update while one is saving", async () => {
-    let resolveUpdate!: (value: Settings) => void;
+  it("queues a second update while one is saving (serialized, not discarded)", async () => {
+    const firstUpdate = deferred<Settings>();
     const ipc = makeIpc();
-    ipc.update.mockReturnValue(
-      new Promise<Settings>((resolve) => {
-        resolveUpdate = resolve;
-      }),
-    );
+    ipc.update
+      .mockReturnValueOnce(firstUpdate.promise)
+      .mockResolvedValueOnce({
+        approvalMode: "manual",
+        maxRetry: 3,
+        telegramNotifications: true,
+        mainAgentId: null,
+      });
     const store = createSettingsStore(ipc);
     await store.load();
 
-    const first = store.update({ approvalMode: "autonomous", maxRetry: 5, telegramNotifications: false });
-    await store.update({ approvalMode: "manual", maxRetry: 3, telegramNotifications: true });
-    resolveUpdate({ approvalMode: "autonomous", maxRetry: 5, telegramNotifications: false });
+    const first = store.update({
+      approvalMode: "autonomous",
+      maxRetry: 5,
+      telegramNotifications: false,
+    });
+    const second = store.update({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+    });
+    await flush();
+    expect(ipc.update).toHaveBeenCalledTimes(1); // second is queued
+
+    firstUpdate.resolve({
+      approvalMode: "autonomous",
+      maxRetry: 5,
+      telegramNotifications: false,
+      mainAgentId: null,
+    });
     await first;
-    expect(ipc.update).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(ipc.update).toHaveBeenCalledTimes(2); // queued update now runs
+    await second;
+    expect(store.getState().data).toEqual({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: null,
+    });
     expect(store.getState().saving).toBe(false);
   });
 

@@ -57,7 +57,8 @@ Rust modules (`src-tauri/src/`):
 | `commands/settings.rs` | Persistent settings load/update |
 | `error.rs` | `CommandError` — the single error contract (`invalid_input` / `storage`) |
 | `db/` | SQLite ownership: connection strategy, transactional migrations, `DbState` |
-| future: `agents/` | Adapter/runtime management (Phase 3+) |
+| `agents/` | Agent registry: static definitions, CLI discovery, controlled verification (Phase 3) |
+| future: adapters | Execution/runtime management (later Phase 3 features) |
 
 Dependency rule: **no circular dependencies** — `commands` may use `db` and `error`; nothing depends on `commands`. Frontend mirrors it: features depend on `lib`, never the reverse.
 
@@ -88,6 +89,7 @@ Task/chunk records (Phase 7) will require: id, project FK (cascade), title/descr
 2. **Rust core ↔ OS** — the core is the only privileged component. Filesystem, process, and future network access happen here, scoped by capability declarations.
 3. **Orqen ↔ external AI providers/agents (future)** — provider APIs and agent processes are untrusted services. Responses are data, never instructions that override Orqen rules ([AGENTS.md §Security rules](../AGENTS.md)).
 4. **User ↔ remote channel (future Telegram)** — remote approvals are second-class: high-risk/destructive actions still require in-app or explicit authorization ([GOVERNANCE.md §Execution controls](GOVERNANCE.md)).
+5. **Rust ↔ agent CLIs (process execution)** — the only process Orqen spawns is a discovered CLI with the single fixed argument `--version`, via `std::process::Command` (no shell), with a hard timeout that kills the child, and bounded output (first 64 KiB kept, remainder drained). No user-supplied strings reach the process arguments; discovery never executes anything; no environment variables are passed to or read from the child. Agent execution (future) will re-visit this boundary with an explicit trust decision per adapter.
 
 Least-privilege posture (Phase 0): capabilities contain `core:default` only; CSP is set in `tauri.conf.json`; the `opener` plugin was deliberately removed (see [DECISIONS.md](DECISIONS.md) D-004/D-005).
 
@@ -116,7 +118,8 @@ All cross-boundary payloads use camelCase JSON; their TypeScript mirrors live in
 Phases (details and acceptance criteria in [ROADMAP.md](ROADMAP.md)) add modules **without changing existing boundaries**:
 
 - Phase 2 ✅ added `db/` (SQLite via rusqlite) with commands mediating all access — the WebView never touches the database.
-- Phase 3 adds `agents/` with adapters as isolated child processes; the frontend learns agents only through commands.
+- Phase 3 (registry milestone) added `agents/`: static definitions, PATH discovery (never executes), and an explicit user-initiated `--version` verification probe. Execution adapters arrive later.
+- Phase 3+ adds agent execution adapters as isolated child processes; the frontend learns agents only through commands.
 - Phase 9 adds Telegram via a Rust-side service; notifications are read-only summaries; approvals round-trip into the same execution-control state machine.
 
 Growth rule: a new capability either fits an existing module's ownership table or gets a new module added to the table here — before implementation.

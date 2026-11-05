@@ -15,6 +15,7 @@ const DEFAULTS: Settings = {
   approvalMode: "manual",
   maxRetry: 3,
   telegramNotifications: true,
+  mainAgentId: null,
 };
 
 function makeIpc(overrides: Partial<SettingsIpc> = {}): SettingsIpc & {
@@ -85,6 +86,7 @@ describe("Settings surface — persisted updates", () => {
       approvalMode: "autonomous",
       maxRetry: 3,
       telegramNotifications: true,
+      mainAgentId: null,
     };
     const ipc = makeIpc();
     ipc.update.mockResolvedValue(stored);
@@ -190,6 +192,7 @@ describe("Settings surface — persisted updates", () => {
       approvalMode: "autonomous",
       maxRetry: 9,
       telegramNotifications: false,
+      mainAgentId: null,
     };
     const ipc = makeIpc({ load: vi.fn().mockResolvedValue(current) });
     const defaults: Settings = { ...DEFAULTS };
@@ -200,7 +203,13 @@ describe("Settings surface — persisted updates", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Restore defaults" }));
     await waitFor(() => {
-      expect(ipc.update).toHaveBeenCalledWith(defaults);
+      // The update payload covers the three execution preferences; the
+      // backend leaves the Main Agent preference untouched.
+      expect(ipc.update).toHaveBeenCalledWith({
+        approvalMode: "manual",
+        maxRetry: 3,
+        telegramNotifications: true,
+      });
     });
     await waitFor(() => {
       expect(screen.getByTestId("settings-state")).toHaveTextContent(

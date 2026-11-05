@@ -5,6 +5,7 @@
 //! - `commands`: Tauri IPC commands exposed to the frontend.
 //! - `error`: shared structured error type for commands.
 
+pub mod agents;
 pub mod commands;
 pub mod db;
 pub mod error;
@@ -33,6 +34,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::agents::list_agents,
+            commands::agents::discover_agent,
+            commands::agents::verify_agent,
             commands::app_info::get_app_info,
             commands::app_info::echo_ping,
             commands::workspace::load_workspace,
@@ -41,6 +45,7 @@ pub fn run() {
             commands::workspace::delete_project,
             commands::settings::load_settings,
             commands::settings::update_settings,
+            commands::settings::set_main_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
