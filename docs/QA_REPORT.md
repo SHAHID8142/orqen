@@ -31,7 +31,7 @@ Only observed results are recorded here — every entry lists the actual command
 | 4 | Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | PASS — 10/10 |
 | 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
 | 6 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS (process level) — ran through the observation window without crashing, 0 error lines, Vite HTTP 200 |
-| 7 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+| 7 | CI status | GitHub Actions | BLOCKED — EXTERNAL. Current observation: after push `37949ea` (2026-11-05) **no run is created at all** — the account restriction now prevents run creation, not just job start (latest recorded run remains 42056645579 with the billing-lock annotation). Workflow remains valid (`actionlint` clean, `active`, `workflow_dispatch` enabled) for when GitHub permits execution. |
 
 Remediation regression tests added:
 
@@ -86,8 +86,11 @@ Observed evidence (read from GitHub, never assumed):
 | 41933399059 | push a441649 | `startup_failure`, 0s, 0 jobs | private repo; no annotations |
 | 41933672348 | push 7421298 | `failure`, 3s, jobs created but not started | annotation: *"The job was not started because your account is locked due to a billing issue."* |
 | 41933868579 | push 021e144 | `failure`, 3s, jobs created but not started | same billing-lock annotation |
+| 41935624408 | push 4fd7e40 | `failure`, 4s, jobs created but not started | same billing-lock annotation |
+| 42056645579 | push 62862da | `failure`, 4s, jobs created but not started | same billing-lock annotation |
+| — | push 37949ea | **no run created** | restriction tightened: GitHub no longer queues runs for this account |
 
-Diagnosis: the workflow file is valid — `actionlint` exit 0, GitHub lists the workflow `active`, and jobs instantiate once the repository is public — so the blocker is the **GitHub account billing restriction**, not the workflow. Per D-011 the repository stays PUBLIC and no Actions-minute purchases are required development steps; CI is simply recorded as blocked until GitHub permits execution again.
+Diagnosis: the workflow file is valid — `actionlint` exit 0, GitHub lists the workflow `active`, and jobs instantiated while runs were still being created — so the blocker is the **GitHub account billing restriction**, not the workflow. Per D-011 the repository stays PUBLIC and no Actions-minute purchases are required development steps; CI is simply recorded as blocked until GitHub permits execution again.
 
 **How to rerun CI when GitHub permits Actions execution** (no code changes needed):
 1. Prefer the manual path: repository → **Actions → CI → Run workflow** (`workflow_dispatch` trigger is configured).
