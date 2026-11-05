@@ -1,0 +1,186 @@
+/* Projects surface — creation form, project list, inline delete confirm.
+   Shared .surface-lead pattern lives in global.css. */
+
+.projects h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.project-create {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.project-create label {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.project-create-row {
+  display: flex;
+  gap: 10px;
+}
+
+.project-create-row input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.project-create-row input[aria-invalid="true"] {
+  border-color: var(--err);
+}
+
+.field-error {
+  margin: 0;
+  color: var(--err);
+  font-size: 13.5px;
+}
+
+.empty-state {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.empty-state h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.project-list {
+  list-style: none;
+  margin: 20px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.project-item {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+}
+
+.project-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.project-select-button {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border: none;
+  background: transparent;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.project-name {
+  font-weight: 600;
+}
+
+.project-meta {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.project-delete {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.project-delete:hover {
+  color: var(--err);
+  border-color: var(--err-border);
+}
+
+.delete-confirm {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.delete-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.delete-confirm-actions .danger {
+  border: 1px solid var(--err-border);
+  background: var(--err-soft);
+  color: var(--err);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.delete-confirm-actions button:not(.danger) {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.selected-note {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+@media (max-width: 640px) {
+  .project-create-row {
+    flex-direction: column;
+  }
+
+  .delete-confirm {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

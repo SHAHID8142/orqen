@@ -5,13 +5,14 @@ import {
   normalizeCommandError,
 } from "../../lib/ipc/appInfo";
 import type { AppInfo, CommandErrorPayload } from "../../types/app";
+import "./Overview.css";
 
 /**
- * Phase 0 foundation screen.
+ * Overview surface.
  *
  * States shown here are real: they come from live IPC calls to the Rust
- * core. Nothing is simulated — if the backend is unavailable the screen
- * shows an error state.
+ * core. Nothing is simulated — if the backend is unavailable the view
+ * shows an error state. (Preserved Phase 0 runtime diagnostics.)
  */
 type RuntimeState =
   | { phase: "loading" }
@@ -20,22 +21,21 @@ type RuntimeState =
 
 /** Capabilities actually implemented in this build. */
 const IMPLEMENTED: readonly string[] = [
+  "Workspace shell with sidebar navigation (Overview, Projects, Agents, Workflows, Settings)",
+  "In-memory project management and preferences (session-only until Phase 2)",
   "Desktop application shell (Tauri 2 + React + TypeScript)",
-  "Rust core with structured IPC commands",
-  "TypeScript strict mode, ESLint, Vitest quality gates",
-  "Project documentation and governance set (docs/)",
+  "Rust core with structured IPC commands and quality gates",
 ];
 
 /** Capabilities planned for later phases — not implemented, not simulated. */
 const PLANNED: readonly string[] = [
-  "Agent registry and provider adapters",
-  "Chat, interview and orchestration",
-  "Workflow execution and task chunking",
-  "Quality verification and shared learning",
-  "SQLite persistence, settings and remote access",
+  "Agent registry and provider adapters (Phase 3)",
+  "Chat, interview and orchestration (Phases 4–6)",
+  "Workflow execution and task chunking (Phase 7)",
+  "SQLite persistence (Phase 2) and Telegram remote access (Phase 10)",
 ];
 
-function FoundationScreen() {
+function Overview() {
   const [runtime, setRuntime] = useState<RuntimeState>({ phase: "loading" });
 
   useEffect(() => {
@@ -68,24 +68,21 @@ function FoundationScreen() {
   }, []);
 
   return (
-    <section aria-labelledby="foundation-heading">
-      <div className="hero">
-        <h1 id="foundation-heading">Orqen is initialized.</h1>
-        <p>
-          The desktop foundation is running. Agent capabilities arrive in
-          later phases — this screen only reports what is real.
-        </p>
-      </div>
+    <section aria-labelledby="overview-heading" className="overview">
+      <h1 id="overview-heading" tabIndex={-1}>
+        Overview
+      </h1>
+      <p className="surface-lead">
+        Current workspace status. Agent capabilities arrive in later phases —
+        this surface only reports what is real.
+      </p>
 
       <div className="runtime-card">
         <h2>Runtime status</h2>
         <ul className="runtime-list">
           <li>
             <span className="runtime-label">Application</span>
-            <span
-              className="runtime-value"
-              data-testid="runtime-app"
-            >
+            <span className="runtime-value" data-testid="runtime-app">
               {runtime.phase === "loading"
                 ? "Loading…"
                 : runtime.phase === "ready"
@@ -128,7 +125,7 @@ function FoundationScreen() {
               <li key={item}>{item}</li>
             ))}
           </ul>
-          <p className="panel-note">Verified by the Phase 0 quality gates.</p>
+          <p className="panel-note">Verified by the project quality gates.</p>
         </section>
 
         <section className="panel planned" aria-labelledby="planned-heading">
@@ -147,4 +144,4 @@ function FoundationScreen() {
   );
 }
 
-export default FoundationScreen;
+export default Overview;

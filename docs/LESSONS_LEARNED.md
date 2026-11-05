@@ -57,3 +57,15 @@ Only entries with a validated root cause and an applied correction belong here. 
 **Root cause:** the test mocked the transport, then implicitly assumed the mock would mirror command semantics (echo) that only the real backend implements.
 **Correction:** tests that assert echoed content set `mockResolvedValueOnce(<expected>)` explicitly; transport-only tests keep the shared default.
 **Prevention rule:** a test may assert on a mock's response only for values that test itself arranged; every assertion must trace to either the system under test or an explicitly configured mock value.
+
+## L-010 | 2026-11-05 | jsdom does not implement `window.matchMedia`
+**What failed:** every shell test failed with `TypeError: window.matchMedia is not a function` once `AppShell` started reading the narrow-width breakpoint.
+**Root cause:** jsdom does not ship `matchMedia`; the component's responsive behavior depends on it.
+**Correction:** added a minimal always-non-matching stub in `src/test/setup.ts` (registered via vitest `setupFiles`); the narrow-window test overrides it with `vi.spyOn(window, "matchMedia")`.
+**Prevention rule:** any DOM API the app depends on that jsdom lacks gets a stub in `src/test/setup.ts` — not per-test hacks — and a test override when a specific match state is needed.
+
+## L-011 | 2026-11-05 | Implicit accessible names from flex spans are brittle
+**What failed:** `getByRole("button", { name: /^A / })` could not find a project select button whose visible text was "A" + "Created 2026-11-05" — the spans sit in a flex row with no whitespace text nodes between them, so the computed accessible name was `"ACreated 2026-11-05"`.
+**Root cause:** relying on textContent concatenation for the accessible name of a button composed of multiple inline/flex spans.
+**Correction:** project select buttons now set an explicit `aria-label={project.name}`; tests query by that exact name and assert selection state via `aria-pressed`.
+**Prevention rule:** interactive controls with composite visible content get explicit accessible names; do not let test queries depend on incidental text-join behavior.

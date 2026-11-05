@@ -1,0 +1,92 @@
+/* Settings surface — preference groups.
+   Shared .surface-lead pattern lives in global.css. */
+
+.settings h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.settings-group {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 18px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.settings-group legend {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.settings-group > label {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.radio-option,
+.checkbox-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.radio-option label,
+.checkbox-option label {
+  font: inherit;
+  color: var(--text);
+}
+
+.option-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.retry-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.retry-row input {
+  width: 90px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.settings-actions {
+  margin-top: 20px;
+}
+
+.settings-actions button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.settings-actions button:hover {
+  border-color: var(--accent);
+}
+
+.settings-note {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}

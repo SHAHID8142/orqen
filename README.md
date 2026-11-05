@@ -61,11 +61,11 @@ The first `tauri dev` compiles the Rust workspace and takes several minutes; sub
 
 ```
 ├── src/                    # React frontend
-│   ├── app/                # Application shell
-│   ├── components/         # Shared UI components
-│   ├── features/           # Feature modules (foundation screen today)
-│   ├── lib/                # IPC bridge, shared logic
-│   ├── styles/             # Global styles (light theme)
+│   ├── app/                # Application shell, navigation model, tests
+│   ├── features/           # overview · projects · agents · workflows · settings
+│   ├── lib/                # ipc bridge, workspace + settings stores, contexts
+│   ├── styles/             # Global tokens, shell styles, a11y helpers
+│   ├── test/               # Vitest environment shims
 │   └── types/              # Shared domain types
 ├── src-tauri/              # Rust backend
 │   ├── src/commands/       # Tauri IPC commands
@@ -94,10 +94,13 @@ Module boundaries and planned modules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 | [docs/STATUS.md](docs/STATUS.md) | Current phase and progress |
 | [docs/QA_REPORT.md](docs/QA_REPORT.md) | Real verification results |
 
-## Current limitations (Phase 0)
+## Current limitations (Phase 1)
 
 - No agent integration, chat interface, orchestration, or persistence — these are later phases ([docs/ROADMAP.md](docs/ROADMAP.md)).
-- The foundation screen reports only real runtime data (app name/version/platform, IPC round trip); if the backend is unavailable it shows an error state.
+- Projects and settings are **in-memory session state**: nothing survives an application restart until Phase 2 introduces SQLite.
+- Settings for Telegram notifications and autonomous execution are preferences only — neither integration is operational.
+- Agents and Workflows surfaces document planned capabilities; they contain no fake statuses or simulated agents.
+- The Overview surface reports only real runtime data (app name/version/platform, IPC round trip); if the backend is unavailable it shows an error state.
 - CI does not run a Windows job yet; Windows behavior is documented, not machine-verified in CI.
 - GitHub Actions execution is blocked by an external account-level billing restriction; CI has not yet produced a successful run (status and rerun path: [docs/QA_REPORT.md](docs/QA_REPORT.md)).
 

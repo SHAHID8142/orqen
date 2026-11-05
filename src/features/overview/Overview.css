@@ -1,0 +1,106 @@
+/* Overview surface — runtime diagnostics.
+   Shared .panel / .surface-lead / .app-main h1 patterns live in global.css. */
+
+.runtime-card {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.runtime-card h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.runtime-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.runtime-label {
+  color: var(--muted);
+}
+
+.runtime-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.status-err {
+  color: var(--err);
+  background: var(--err-soft);
+  border: 1px solid var(--err-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.status-loading {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.runtime-error {
+  margin: 12px 0 0;
+  color: var(--err);
+  background: var(--err-soft);
+  border: 1px solid var(--err-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13.5px;
+}
+
+.panels {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.panel.planned {
+  border-style: dashed;
+}
+
+@media (max-width: 640px) {
+  .panels {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-list li {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+}

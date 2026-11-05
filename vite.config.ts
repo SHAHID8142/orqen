@@ -34,6 +34,7 @@ export default defineConfig(() => ({
   // Vitest configuration (see https://vitest.dev/config/)
   test: {
     environment: "jsdom",
+    setupFiles: ["src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
   },
 }));

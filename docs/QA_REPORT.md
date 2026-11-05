@@ -21,6 +21,24 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 1 · Feature 001 verification (2026-11-05, local, macOS 27.2 arm64)
+
+All results are observed outcomes with unpiped exit codes.
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS |
+| 2 | Frontend gate | `npm run verify` (lint → typecheck → test → build) | PASS — exit 0; **52/52 tests**, 7 files |
+| 3 | Rust format | `npm run rust:fmt` | PASS — exit 0 |
+| 4 | Rust lints | `npm run rust:clippy` | PASS — exit 0 |
+| 5 | Rust compile | `npm run rust:check` | PASS — exit 0 |
+| 6 | Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | PASS — 10/10 (Phase 0 Unicode regressions still green) |
+| 7 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 8 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS (process level) — app compiled and ran through the observation window without crashing, 0 error lines, Vite HTTP 200. Visual on-screen confirmation remains for the user's first manual launch. |
+| 9 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+Test coverage added for Feature 001: navigation between all five surfaces without reloads; `aria-current` active states; heading focus on navigation; skip link; header project reflection; sidebar toggle `aria-expanded`; Escape closes narrow overlay and restores focus; project creation/selection/deletion with inline confirmation; project name validation (empty, duplicate, over code-point limit, Unicode names); empty states; settings changes incl. retry clamping; Phase 0 runtime diagnostics preserved on Overview.
+
 ## Phase 0 remediation verification (2026-11-05, local, macOS 27.2 arm64)
 
 All results below are observed outcomes; exit codes were captured without pipes after the L-003 lesson.

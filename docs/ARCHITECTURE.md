@@ -35,13 +35,18 @@ Frontend modules (`src/`):
 
 | Module | Owns | Must not |
 | --- | --- | --- |
-| `app/` | Application shell, layout, top-level composition | contain feature logic |
-| `features/<name>/` | One user-facing feature per folder, self-contained | import across features (extract to `lib/` instead) |
-| `components/` | Shared presentational components | fetch data or hold domain state |
+| `app/` | Application shell (`AppShell`, `SidebarNav`), navigation model (`views.ts`), provider composition | contain feature logic |
+| `features/<name>/` | One user-facing feature per folder (overview, projects, agents, workflows, settings), self-contained with colocated CSS | import across features (extract to `lib/` instead) |
+| `components/` | Shared presentational components (none yet — create only when genuinely reused) | fetch data or hold domain state |
+| `lib/workspace/` | In-memory project store: types, validation, observable store, React context | know about specific views |
+| `lib/settings/` | In-memory preference store: same pattern as workspace | persist anything (Phase 2 scope) |
 | `lib/ipc/` | All `invoke()` calls, payload typing, error normalization | be bypassed by feature code calling `invoke` directly |
 | `lib/` | Shared frontend logic/utilities | know about specific features |
 | `types/` | Cross-module domain types mirroring Rust payloads | contain logic |
-| `styles/` | Global light-theme styles | encode feature-specific selectors (use component styles) |
+| `styles/` | Global tokens, base, shell, shared surface patterns, a11y helpers | encode feature-specific selectors (colocate those with features) |
+| `test/` | Vitest/jsdom environment shims (e.g. matchMedia stub) | contain product code |
+
+State pattern (D-013): framework-agnostic observable stores live in `lib/<domain>/store.ts`; React binds via `useSyncExternalStore` context providers. Features consume state with `use<Domain>()` and actions with `use<Domain>Store()`. Stores are injectable into `App` for isolated tests.
 
 Rust modules (`src-tauri/src/`):
 

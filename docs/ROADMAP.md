@@ -16,11 +16,18 @@ Private GitHub repository; runnable Tauri 2 + React + TypeScript desktop shell; 
 - [x] No secrets committed.
 
 ## Phase 1 — Workspace Shell & Navigation
-Priority P0 | Dependencies: Phase 0
+**Status: delivered (Feature 001, 2026-11-05)** | Priority P0 | Dependencies: Phase 0
 
-Multi-module shell (routing/navigation between placeholders per [ARCHITECTURE.md §Module boundaries](ARCHITECTURE.md)), workspace/project concept (in-memory), theme system baseline, accessibility baseline (keyboard navigation, ARIA labels, focus states), settings page skeleton storing values in memory.
+Multi-module shell (state-based navigation per [ARCHITECTURE.md §Module boundaries](ARCHITECTURE.md), D-013), in-memory workspace/project concept, accessibility baseline (keyboard navigation, ARIA labels, focus states), settings page storing values in memory.
 
-**Acceptance criteria:** navigate between ≥4 module surfaces without full reloads; no lint/type regressions; keyboard traversal verified; navigation state survives app restart **not** required yet.
+**Acceptance criteria:**
+- [x] Navigate between the 5 module surfaces without full reloads (state-based; asserted by tests).
+- [x] No lint/type regressions (all gates pass — docs/QA_REPORT.md Phase 1 section).
+- [x] Keyboard traversal verified (buttons keyboard-activatable, Escape closes overlay sidebar, focus moves to view heading, skip link; automated tests).
+- [x] In-memory project creation/selection/deletion with validation and explicit delete confirmation; empty states.
+- [x] Settings controls functional in memory with truthful "preference only" labeling.
+- [~] Per-project isolated context: project record + selection exist; context isolation arrives with persistence (Phase 2).
+- [x] Navigation state survives app restart **not** required (in-memory by design, documented).
 
 ## Phase 2 — Local Persistence (SQLite) & Settings
 Priority P0 | Dependencies: Phase 1

@@ -1,31 +1,48 @@
-import FoundationScreen from "../features/foundation/FoundationScreen";
+import { useState } from "react";
+import { createAppSettingsStore, SettingsProvider } from "../lib/settings/SettingsContext";
+import type { SettingsStore } from "../lib/settings/store";
+import { createAppWorkspaceStore, WorkspaceProvider } from "../lib/workspace/WorkspaceContext";
+import type { WorkspaceStore } from "../lib/workspace/store";
+import Agents from "../features/agents/Agents";
+import Overview from "../features/overview/Overview";
+import Projects from "../features/projects/Projects";
+import SettingsSurface from "../features/settings/SettingsSurface";
+import Workflows from "../features/workflows/Workflows";
+import AppShell from "./AppShell";
+import type { ViewId } from "./views";
 
 /**
- * Application shell.
+ * Application root.
  *
- * In later phases this shell hosts workspace navigation and module views
- * (chat, agents, workflows). Phase 0 renders only the foundation screen.
+ * Holds the active navigation view (state-based switching, D-013) and the
+ * two in-memory stores. Session state only — nothing persists across
+ * restarts until Phase 2. Stores are injectable for tests.
  */
-function App() {
+
+const defaultWorkspaceStore = createAppWorkspaceStore();
+const defaultSettingsStore = createAppSettingsStore();
+
+function App({
+  workspace = defaultWorkspaceStore,
+  settings = defaultSettingsStore,
+}: {
+  workspace?: WorkspaceStore;
+  settings?: SettingsStore;
+} = {}) {
+  const [activeView, setActiveView] = useState<ViewId>("overview");
+
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="app-brand">
-          <span className="app-logo" aria-hidden="true">
-            O
-          </span>
-          <span className="app-name">Orqen</span>
-        </div>
-        <span className="phase-badge">Phase 0 · Foundation</span>
-      </header>
-      <main className="app-main">
-        <FoundationScreen />
-      </main>
-      <footer className="app-footer">
-        <span>Orqen — local-first AI multi-agent development workspace.</span>
-        <span>Current status: docs/STATUS.md · Plans: docs/ROADMAP.md</span>
-      </footer>
-    </div>
+    <WorkspaceProvider store={workspace}>
+      <SettingsProvider store={settings}>
+        <AppShell activeView={activeView} onNavigate={setActiveView}>
+          {activeView === "overview" && <Overview />}
+          {activeView === "projects" && <Projects />}
+          {activeView === "agents" && <Agents />}
+          {activeView === "workflows" && <Workflows />}
+          {activeView === "settings" && <SettingsSurface />}
+        </AppShell>
+      </SettingsProvider>
+    </WorkspaceProvider>
   );
 }
 
