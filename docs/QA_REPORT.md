@@ -21,6 +21,37 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 1 · Feature 001 accessibility fix verification (2026-11-05, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` (lint → typecheck → test → build) | PASS — exit 0; **70/70 tests**, 7 files (19 shell tests incl. 8 new containment regressions) |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust unit tests | `cargo test` | PASS — 10/10 |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS (process level) — no crash, 0 error lines, Vite HTTP 200 |
+| 7 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+### Real-browser keyboard verification (in-app browser engine, viewport 500×800 narrow / 1280×800 wide, app served by `npm run dev`)
+
+jsdom cannot emulate native Tab traversal or `inert` focus semantics, so the overlay interaction model was additionally verified against a real browser engine with trusted keyboard events:
+
+| Step | Expected | Observed |
+| --- | --- | --- |
+| Open drawer via toggle (keyboard Enter) | focus → first nav item ("Overview") | PASS |
+| Tab forward ×4 | Projects → Agents → Workflows → Settings, never leaving the drawer | PASS |
+| Tab from Settings (last nav item) | wrap into drawer → close button (✕) | PASS (after fix; **initially failed** — see below) |
+| Tab from ✕ | wrap → Overview | PASS |
+| Shift+Tab from Overview | wrap backwards → ✕ | PASS |
+| Programmatic `focus()` on inert header/skip link | rejected (focus stays in drawer) | PASS (engine-level containment proof) |
+| Escape | drawer closes, `inert` removed everywhere, focus → toggle | PASS |
+| Close-button click / backdrop click | drawer closes, focus → toggle | PASS / PASS |
+| Navigation selection (Projects) | drawer closes, focus → view heading (not toggle) | PASS |
+| Desktop 1280×800 | nothing inert, skip link reachable, docked sidebar, no dialog role | PASS |
+
+**Defect found and fixed by this verification:** Chromium does not complete the Tab wrap-around across `inert` regions — Tab from the drawer's last element stranded focus on `<body>` instead of returning into the drawer. Fixed with an explicit Tab/Shift+Tab boundary wrap on the drawer, overlay mode only (jsdom cannot reproduce this; see [LESSONS_LEARNED.md](LESSONS_LEARNED.md) L-014). An earlier focus-restoration defect (synchronous `focus()` on the still-`inert` toggle — a no-op in real browsers, invisible in jsdom) was also fixed by restoring focus in an effect after the commit that removes `inert`.
+
 ## Phase 1 · Feature 001 review remediation verification (2026-11-05, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

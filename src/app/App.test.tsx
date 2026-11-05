@@ -3,6 +3,7 @@
  * active-state semantics, header project reflection, sidebar behavior
  * and keyboard support. IPC is mocked; everything else runs for real.
  */
+import { act } from "react";
 import {
   afterEach,
   beforeEach,
@@ -55,6 +56,31 @@ describe("App shell navigation", () => {
       removeEventListener: () => undefined,
     } as unknown as MediaQueryList);
     return renderApp();
+  }
+
+  /** MatchMedia stub whose matches state tests can flip mid-test. */
+  function stubControllableMatchMedia(initialMatches: boolean) {
+    const listeners = new Set<(event: { matches: boolean }) => void>();
+    const stub = {
+      matches: initialMatches,
+      addEventListener: (
+        _type: string,
+        listener: (event: { matches: boolean }) => void,
+      ) => listeners.add(listener),
+      removeEventListener: (
+        _type: string,
+        listener: (event: { matches: boolean }) => void,
+      ) => listeners.delete(listener),
+    };
+    vi.spyOn(window, "matchMedia").mockReturnValue(
+      stub as unknown as MediaQueryList,
+    );
+    return {
+      setMatches(matches: boolean) {
+        stub.matches = matches;
+        for (const listener of listeners) listener({ matches });
+      },
+    };
   }
 
   it("renders all five navigation surfaces and starts on Overview", () => {
@@ -230,14 +256,153 @@ describe("App shell navigation", () => {
 
   it("keeps background content inert only while the narrow overlay is open", () => {
     const { container } = renderWithNarrowWindow();
-    const main = container.querySelector("main")!;
 
-    expect(main).not.toHaveAttribute("inert");
+    const inertTargets = () =>
+      [container.querySelector("main"), container.querySelector("header"), container.querySelector(".skip-link")].map(
+        (el) => el!.hasAttribute("inert"),
+      );
+
+    // Closed: nothing inert.
+    expect(inertTargets()).toEqual([false, false, false]);
+
+    // Open (exact names: the drawer's own "Close navigation" button also
+    // exists once open).
+    fireEvent.click(screen.getByRole("button", { name: "Show navigation" }));
+    // Modal drawer: main, header (toggle included) and skip link are inert,
+    // so Tab/Shift+Tab cannot reach obscured controls.
+    expect(inertTargets()).toEqual([true, true, true]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide navigation" })); // close
+    expect(inertTargets()).toEqual([false, false, false]);
+  });
+
+  it("never applies inert in desktop mode, even with the docked sidebar open", () => {
+    const { container } = renderApp();
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // close
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // open
+
+    for (const el of [container.querySelector("main"), container.querySelector("header"), container.querySelector(".skip-link")]) {
+      expect(el).not.toHaveAttribute("inert");
+    }
+  });
+
+  it("applies dialog semantics only in overlay mode", () => {
+    const { unmount } = renderWithNarrowWindow();
 
     fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // open
-    expect(main).toHaveAttribute("inert");
+    const drawer = document.getElementById("workspace-sidebar")!;
+    expect(drawer).toHaveAttribute("role", "dialog");
+    expect(drawer).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByRole("button", { name: "Close navigation" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // close
-    expect(main).not.toHaveAttribute("inert");
+    unmount();
+    renderApp();
+    const docked = document.getElementById("workspace-sidebar")!;
+    expect(docked).not.toHaveAttribute("role");
+    expect(docked).not.toHaveAttribute("aria-modal");
+    expect(screen.queryByRole("button", { name: "Close navigation" })).not.toBeInTheDocument();
+  });
+
+  it("closes via the in-drawer close button and restores focus to the toggle", () => {
+    renderWithNarrowWindow();
+
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // open
+    fireEvent.click(screen.getByRole("button", { name: "Close navigation" }));
+
+    expect(
+      screen.queryByRole("navigation", { name: "Workspace sections" }),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /navigation/i }),
+    );
+  });
+
+  it("wraps Tab at the drawer boundaries in overlay mode", () => {
+    renderWithNarrowWindow();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show navigation" })); // open
+    const drawer = document.getElementById("workspace-sidebar")!;
+
+    // Tab on the LAST drawer element wraps to the FIRST (the close button
+    // is first in DOM order; the last is the Settings nav item).
+    const settingsItem = screen.getByRole("button", { name: "Settings" });
+    settingsItem.focus();
+    fireEvent.keyDown(drawer, { key: "Tab" });
+    expect(document.activeElement).toBe(
+      drawer.querySelector(".sidebar-close"),
+    );
+
+    // Shift+Tab on the FIRST drawer element wraps to the LAST.
+    fireEvent.keyDown(drawer, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(settingsItem);
+  });
+
+  it("does not intercept Tab in docked desktop mode", () => {
+    renderApp(); // wide viewport, docked sidebar open
+
+    const settingsItem = screen.getByRole("button", { name: "Settings" });
+    settingsItem.focus();
+    fireEvent.keyDown(
+      document.getElementById("workspace-sidebar")!,
+      { key: "Tab" },
+    );
+    // Native behavior untouched: focus stays where the browser puts it
+    // (jsdom does not move focus), and the handler must not wrap it.
+    expect(document.activeElement).toBe(settingsItem);
+  });
+
+  it("navigation selection closes the overlay and focuses the view heading, not the toggle", () => {
+    renderWithNarrowWindow();
+
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // open
+    fireEvent.click(screen.getByRole("button", { name: "Projects" }));
+
+    expect(
+      screen.queryByRole("navigation", { name: "Workspace sections" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Projects" }),
+    ).toHaveFocus();
+    expect(document.activeElement).not.toBe(
+      screen.getByRole("button", { name: /navigation/i }),
+    );
+  });
+
+  it("restores focus to the toggle when the viewport narrows while focus is in the sidebar", () => {
+    const media = stubControllableMatchMedia(false); // start wide, docked open
+    renderApp();
+
+    // Keyboard user is sitting on a nav item when the window narrows.
+    screen.getByRole("button", { name: "Projects" }).focus();
+    act(() => {
+      media.setMatches(true); // wide -> narrow: sidebar collapses
+    });
+
+    expect(
+      screen.queryByRole("navigation", { name: "Workspace sections" }),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Show navigation" }),
+    );
+  });
+
+  it("removes overlay containment when the viewport widens while the drawer is open", () => {
+    const media = stubControllableMatchMedia(true); // narrow from the start
+    const { container } = renderApp();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show navigation" })); // open
+    expect(container.querySelector("main")).toHaveAttribute("inert");
+    expect(document.getElementById("workspace-sidebar")).toHaveAttribute("role", "dialog");
+
+    act(() => {
+      media.setMatches(false); // narrow -> wide: drawer becomes docked
+    });
+
+    expect(
+      screen.getByRole("navigation", { name: "Workspace sections" }),
+    ).toBeInTheDocument(); // stays open, now docked
+    expect(container.querySelector("main")).not.toHaveAttribute("inert");
+    expect(container.querySelector("header")).not.toHaveAttribute("inert");
+    expect(document.getElementById("workspace-sidebar")).not.toHaveAttribute("role");
   });
 });

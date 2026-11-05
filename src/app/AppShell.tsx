@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type { ChangeEvent, ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { useWorkspace, useWorkspaceStore } from "../lib/workspace/WorkspaceContext";
 import SidebarNav from "./SidebarNav";
 import { NARROW_WIDTH_QUERY, type ViewId } from "./views";
@@ -7,13 +7,14 @@ import { NARROW_WIDTH_QUERY, type ViewId } from "./views";
 /**
  * Application shell: header, collapsible sidebar navigation, main content.
  *
- * Accessibility: skip link, labeled controls, focus moves to the active
- * view's heading on navigation. On narrow widths the sidebar is an
- * overlay: opening moves focus to the first nav item, background content
- * becomes `inert`, and every close path (Escape, backdrop, toggle)
- * restores focus to the toggle. The sidebar stays mounted with `hidden`
- * so `aria-controls` always points at a real element — no focus traps,
- * no hidden tab stops.
+ * Narrow widths turn the sidebar into a modal drawer (WAI-ARIA APG modal
+ * drawer pattern): focus moves into the drawer on open, and every element
+ * outside it (skip link, header, main) becomes `inert`, so Tab and
+ * Shift+Tab cannot reach obscured controls — containment is the platform
+ * mechanism, not a JS tab-trap. The drawer offers a close button and
+ * Escape; every close path without navigation restores focus to the
+ * toggle *after* the commit that removes `inert`. On desktop the sidebar
+ * is a plain docked region with normal keyboard navigation.
  */
 function AppShell({
   activeView,
@@ -32,45 +33,59 @@ function AppShell({
   const [sidebarOpen, setSidebarOpen] = useState(
     () => !window.matchMedia(NARROW_WIDTH_QUERY).matches,
   );
+  // Set when a close is pending that should hand focus back to the toggle;
+  // consumed by an effect so focus happens after `inert` is removed.
+  const [pendingFocusRestore, setPendingFocusRestore] = useState(false);
+
   const toggleRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLElement>(null);
+
+  const overlayActive = isNarrow && sidebarOpen;
 
   // Track the narrow-width breakpoint so the sidebar can switch between
   // docked and overlay behavior without CSS/JS duplication.
   useEffect(() => {
     const query = window.matchMedia(NARROW_WIDTH_QUERY);
     const onChange = (event: MediaQueryListEvent) => {
+      // If focus sits inside the sidebar while it collapses (wide ->
+      // narrow), it would be stranded on <body> — hand it to the toggle.
+      const focusInSidebar =
+        sidebarRef.current?.contains(document.activeElement) ?? false;
       setIsNarrow(event.matches);
       setSidebarOpen(!event.matches);
+      if (event.matches && focusInSidebar) setPendingFocusRestore(true);
     };
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
   }, []);
 
-  const closeOverlayAndRestoreFocus = () => {
-    setSidebarOpen(false);
-    toggleRef.current?.focus();
-  };
-
-  // Escape closes the overlay sidebar and returns focus to the toggle.
+  // Consume pending focus restoration after the commit that removed
+  // `inert` from the header — focusing an inert element is a no-op.
   useEffect(() => {
-    if (!sidebarOpen || !isNarrow) return;
+    if (!pendingFocusRestore) return;
+    toggleRef.current?.focus();
+    setPendingFocusRestore(false);
+  }, [pendingFocusRestore]);
+
+  // Escape closes the modal drawer.
+  useEffect(() => {
+    if (!overlayActive) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setSidebarOpen(false);
-        toggleRef.current?.focus();
+        setPendingFocusRestore(true);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [sidebarOpen, isNarrow]);
+  }, [overlayActive]);
 
-  // Opening the narrow overlay moves focus into it (first nav item).
+  // Opening the modal drawer moves focus into it (first nav item).
   useEffect(() => {
-    if (!sidebarOpen || !isNarrow) return;
+    if (!overlayActive) return;
     sidebarRef.current?.querySelector<HTMLElement>(".nav-item")?.focus();
-  }, [sidebarOpen, isNarrow]);
+  }, [overlayActive]);
 
   // Focus the active view's heading after navigation (skip link target
   // stays available for explicit jumps).
@@ -78,6 +93,36 @@ function AppShell({
     const heading = mainRef.current?.querySelector("h1");
     heading?.focus();
   }, [activeView]);
+
+  const closeOverlayAndRestoreFocus = useCallback(() => {
+    setSidebarOpen(false);
+    setPendingFocusRestore(true);
+  }, []);
+
+  /**
+   * Explicit Tab/Shift+Tab wrap at the drawer boundaries, overlay mode only.
+   *
+   * Chromium does not complete the focus wrap-around across `inert`
+   * regions — Tab from the drawer's last element strands focus on
+   * `<body>` (observed in a real browser). The drawer therefore owns its
+   * own boundary wrap; interior Tab presses are left to the browser.
+   */
+  function handleDrawerKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (!overlayActive || event.key !== "Tab" || !sidebarRef.current) return;
+    const tabbables = sidebarRef.current.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    if (tabbables.length === 0) return;
+    const first = tabbables[0]!;
+    const last = tabbables[tabbables.length - 1]!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   function handleNavigate(view: ViewId) {
     onNavigate(view);
@@ -96,11 +141,11 @@ function AppShell({
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#main-content">
+      <a className="skip-link" href="#main-content" inert={overlayActive ? true : undefined}>
         Skip to main content
       </a>
 
-      <header className="app-header">
+      <header className="app-header" inert={overlayActive ? true : undefined}>
         <button
           ref={toggleRef}
           type="button"
@@ -158,13 +203,27 @@ function AppShell({
         ref={sidebarRef}
         className={`app-sidebar${isNarrow ? " overlay" : ""}`}
         hidden={!sidebarOpen}
+        role={overlayActive ? "dialog" : undefined}
+        aria-modal={overlayActive ? true : undefined}
+        aria-label="Workspace navigation"
+        onKeyDown={handleDrawerKeyDown}
       >
+        {overlayActive && (
+          <button
+            type="button"
+            className="sidebar-close"
+            aria-label="Close navigation"
+            onClick={closeOverlayAndRestoreFocus}
+          >
+            ✕
+          </button>
+        )}
         <SidebarNav activeView={activeView} onNavigate={handleNavigate} />
         <p className="sidebar-footnote">
           In-memory session state — persistence arrives in Phase 2.
         </p>
       </aside>
-      {isNarrow && sidebarOpen && (
+      {overlayActive && (
         <div
           className="sidebar-backdrop"
           onClick={closeOverlayAndRestoreFocus}
@@ -177,9 +236,9 @@ function AppShell({
         ref={mainRef}
         className="app-main"
         tabIndex={-1}
-        // While the narrow-width overlay is open, keep background content
-        // out of the tab order (React 19 boolean `inert`).
-        inert={isNarrow && sidebarOpen ? true : undefined}
+        // Modal drawer: content is out of the tab order and a11y tree
+        // while the overlay is open (React 19 boolean `inert`).
+        inert={overlayActive ? true : undefined}
       >
         {children}
       </main>
