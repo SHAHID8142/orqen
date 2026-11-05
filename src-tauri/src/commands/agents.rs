@@ -111,59 +111,75 @@ pub fn list_agents() -> CommandResult<Vec<AgentStatusDto>> {
 }
 
 /// Locates the agent's executable on the search path. Never executes it.
+///
+/// Async: the filesystem walk runs on a dedicated blocking worker so the
+/// Tauri main thread and the async executor stay responsive.
 #[tauri::command]
-pub fn discover_agent(id: String) -> CommandResult<AgentStatusDto> {
+pub async fn discover_agent(id: String) -> CommandResult<AgentStatusDto> {
     let definition = definition_for_id(&id)?;
-    let mut status = definition_to_status(definition);
-    status.checked_at = Some(now_rfc3339());
-    status.discovery = match discovery::discover(definition) {
-        discovery::DiscoveryOutcome::Found { path } => DiscoveryDto::Found {
-            path: path.to_string_lossy().to_string(),
-        },
-        discovery::DiscoveryOutcome::NotFound => DiscoveryDto::NotFound,
-        discovery::DiscoveryOutcome::Error { message } => DiscoveryDto::Error { message },
-    };
-    Ok(status)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut status = definition_to_status(definition);
+        status.checked_at = Some(now_rfc3339());
+        status.discovery = match discovery::discover(definition) {
+            discovery::DiscoveryOutcome::Found { path } => DiscoveryDto::Found {
+                path: path.to_string_lossy().to_string(),
+            },
+            discovery::DiscoveryOutcome::NotFound => DiscoveryDto::NotFound,
+            discovery::DiscoveryOutcome::Error { message } => DiscoveryDto::Error { message },
+        };
+        Ok(status)
+    })
+    .await
+    .map_err(|e| CommandError::Storage(format!("discovery task failed: {e}")))?
 }
 
 /// Explicit, user-initiated CLI verification: resolves the executable
 /// via discovery, then runs the fixed `--version` probe. Discovery
 /// status is reported alongside so the UI can show both truthfully.
+///
+/// Async: process spawning, polling, and pipe draining run on a dedicated
+/// blocking worker — the Tauri main thread is never blocked by a slow or
+/// hung probe, and the database is untouched during verification.
 #[tauri::command]
-pub fn verify_agent(id: String) -> CommandResult<AgentStatusDto> {
+pub async fn verify_agent(id: String) -> CommandResult<AgentStatusDto> {
     let definition = definition_for_id(&id)?;
-    let mut status = definition_to_status(definition);
-    status.checked_at = Some(now_rfc3339());
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = definition.id;
+        let mut status = definition_to_status(definition);
+        status.checked_at = Some(now_rfc3339());
 
-    let path = match discovery::discover(definition) {
-        discovery::DiscoveryOutcome::Found { path } => {
-            status.discovery = DiscoveryDto::Found {
-                path: path.to_string_lossy().to_string(),
-            };
-            path
-        }
-        discovery::DiscoveryOutcome::NotFound => {
-            status.discovery = DiscoveryDto::NotFound;
-            return Ok(status);
-        }
-        discovery::DiscoveryOutcome::Error { message } => {
-            status.discovery = DiscoveryDto::Error { message };
-            return Ok(status);
-        }
-    };
-
-    status.verification = Some(match verify::verify_cli(&path, verify::DEFAULT_TIMEOUT) {
-        Ok(verified) => VerificationDto::Verified {
-            version: verified.version,
-        },
-        Err(error) => {
-            eprintln!("orqen agents: verification of {id} failed: {error:?}");
-            VerificationDto::Failed {
-                message: error.user_message(),
+        let path = match discovery::discover(definition) {
+            discovery::DiscoveryOutcome::Found { path } => {
+                status.discovery = DiscoveryDto::Found {
+                    path: path.to_string_lossy().to_string(),
+                };
+                path
             }
-        }
-    });
-    Ok(status)
+            discovery::DiscoveryOutcome::NotFound => {
+                status.discovery = DiscoveryDto::NotFound;
+                return Ok(status);
+            }
+            discovery::DiscoveryOutcome::Error { message } => {
+                status.discovery = DiscoveryDto::Error { message };
+                return Ok(status);
+            }
+        };
+
+        status.verification = Some(match verify::verify_cli(&path, verify::DEFAULT_TIMEOUT) {
+            Ok(verified) => VerificationDto::Verified {
+                version: verified.version,
+            },
+            Err(error) => {
+                eprintln!("orqen agents: verification of {id} failed: {error:?}");
+                VerificationDto::Failed {
+                    message: error.user_message(),
+                }
+            }
+        });
+        Ok(status)
+    })
+    .await
+    .map_err(|e| CommandError::Storage(format!("verification task failed: {e}")))?
 }
 
 #[cfg(test)]
@@ -181,13 +197,15 @@ mod tests {
 
     #[test]
     fn unknown_agent_ids_are_rejected() {
-        let error = discover_agent("ghost".to_string()).expect_err("must reject");
+        // Validation happens synchronously before any spawn_blocking work.
+        let error = tauri::async_runtime::block_on(discover_agent("ghost".to_string()))
+            .expect_err("must reject");
         match error {
             CommandError::InvalidInput(message) => {
                 assert!(message.contains("not a supported agent"), "got: {message}");
             }
             other => panic!("expected InvalidInput, got: {other:?}"),
         }
-        assert!(verify_agent("ghost".to_string()).is_err());
+        assert!(tauri::async_runtime::block_on(verify_agent("ghost".to_string())).is_err());
     }
 }

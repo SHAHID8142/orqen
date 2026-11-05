@@ -111,7 +111,8 @@ function Agents() {
   const settings = useSettings();
   const settingsStore = useSettingsStore();
 
-  const ready = agents.phase === "ready";
+  const settingsReady = settings.phase === "ready";
+  const settingsError = settings.phase === "error";
   const pendingId =
     agents.pendingAction?.kind === "discover" || agents.pendingAction?.kind === "verify"
       ? agents.pendingAction.id
@@ -196,8 +197,33 @@ function Agents() {
         ))}
       </div>
 
-      <fieldset className="settings-group" disabled={!ready || settings.saving}>
+      <fieldset
+        className="settings-group"
+        disabled={!settingsReady || settings.saving}
+        aria-busy={settings.saving}
+      >
         <legend>Preferred Main Agent</legend>
+        {settings.phase === "loading" && (
+          <p className="option-note" data-testid="main-agent-loading">
+            Loading preferences…
+          </p>
+        )}
+        {settingsError && (
+          <div role="alert" data-testid="main-agent-error">
+            <p className="field-error">
+              {settings.loadError?.message ??
+                "Settings are unavailable. Your preference is untouched."}
+            </p>
+            <button type="button" onClick={() => void settingsStore.load()}>
+              Retry
+            </button>
+          </div>
+        )}
+        {settings.actionError && (
+          <p className="field-error" role="alert" data-testid="main-agent-action-error">
+            {settings.actionError.message}
+          </p>
+        )}
         <p className="option-note">
           A saved preference for a later feature — selecting an agent starts
           nothing today.

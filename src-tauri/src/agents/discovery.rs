@@ -52,7 +52,7 @@ pub fn discover_in_dirs(definition: &AgentDefinition, dirs: &[PathBuf]) -> Disco
             // Inaccessible or non-regular entries are skipped, not errors:
             // one broken PATH entry must not hide other installations.
             match std::fs::metadata(&candidate) {
-                Ok(metadata) if metadata.is_file() => {
+                Ok(metadata) if metadata.is_file() && is_executable(&metadata) => {
                     return DiscoveryOutcome::Found { path: candidate };
                 }
                 _ => continue,
@@ -62,10 +62,26 @@ pub fn discover_in_dirs(definition: &AgentDefinition, dirs: &[PathBuf]) -> Disco
     DiscoveryOutcome::NotFound
 }
 
+/// Platform executability signal. Unix exposes the permission bits; on
+/// Windows the extension allowlist applied by `candidates_for_platform`
+/// is the available signal.
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
 /// Builds the candidate paths for one PATH directory. Windows resolves
 /// `.exe`/`.cmd`/`.bat` without an explicit extension; unix does not.
 #[cfg(windows)]
-fn candidates_for_platform(dir: &Path, executable_name: &str) -> Vec<PathBuf> {
+pub(crate) fn candidates_for_platform(dir: &Path, executable_name: &str) -> Vec<PathBuf> {
     let mut candidates = vec![dir.join(executable_name)];
     for extension in WINDOWS_EXTENSIONS {
         candidates.push(dir.join(format!("{executable_name}{extension}")));
@@ -197,15 +213,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn directories_arent_shaded_by_same_named_files_earlier_in_the_path() {
-        // A non-executable same-named FILE earlier in the search order must
-        // not satisfy discovery (metadata.is_file() would pass for a plain
-        // file — we accept it as "found" because executability is verified
-        // separately; this test pins current, documented behavior).
+    fn non_executable_files_do_not_count_as_found() {
+        // A regular file without execute bits must NOT be reported as an
+        // executable candidate (unix exposes the permission bits — use
+        // them; see docs/ARCHITECTURE.md for the Windows boundary).
         let first = temp_db_dir();
         fs::write(first.join("codex"), b"not executable").expect("write plain file");
         let outcome = discover_in_dirs(&DEFINITION, std::slice::from_ref(&first));
-        assert!(matches!(outcome, DiscoveryOutcome::Found { .. }));
+        assert_eq!(outcome, DiscoveryOutcome::NotFound);
         let _ = std::fs::remove_dir_all(&first);
+    }
+
+    #[test]
+    fn symlinks_to_executables_are_resolved_safely() {
+        // metadata() follows symlinks: a link pointing at a real
+        // executable is a valid candidate; a broken link is skipped.
+        let dir = temp_db_dir();
+        let target = dir.join("real-codex");
+        make_executable(&target);
+        // The link itself carries the candidate name (`codex`).
+        std::os::unix::fs::symlink(&target, dir.join("codex")).expect("symlink");
+        let outcome = discover_in_dirs(&DEFINITION, std::slice::from_ref(&dir));
+        match outcome {
+            DiscoveryOutcome::Found { path } => {
+                assert_eq!(path, dir.join("codex"))
+            }
+            other => panic!("expected Found via symlink, got: {other:?}"),
+        }
+
+        let broken = temp_db_dir();
+        std::os::unix::fs::symlink(broken.join("missing-target"), broken.join("codex"))
+            .expect("broken symlink");
+        let outcome = discover_in_dirs(&DEFINITION, std::slice::from_ref(&broken));
+        assert_eq!(outcome, DiscoveryOutcome::NotFound);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&broken);
     }
 }

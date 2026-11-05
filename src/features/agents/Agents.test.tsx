@@ -11,6 +11,7 @@ import { SettingsProvider } from "../../lib/settings/SettingsContext";
 import { createSettingsStore, type SettingsIpc } from "../../lib/settings/store";
 import Agents from "./Agents";
 import type { AgentRecord } from "../../types/agents";
+import type { Settings } from "../../types/workspace";
 
 function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -30,6 +31,20 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     checkedAt: null,
     ...overrides,
   };
+}
+
+/** Lets queued store operations start before mid-flight assertions. */
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/** Deferred promise for controlling backend timing in tests. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function makeAgentsIpc(overrides: Partial<AgentsIpc> = {}): AgentsIpc & {
@@ -55,7 +70,13 @@ function makeAgentsIpc(overrides: Partial<AgentsIpc> = {}): AgentsIpc & {
   } as never;
 }
 
-function makeSettingsIpc(overrides: Partial<SettingsIpc> = {}): SettingsIpc {
+function makeSettingsIpc(
+  overrides: Partial<SettingsIpc> = {},
+): SettingsIpc & {
+  load: ReturnType<typeof vi.fn>;
+  update: ReturnType<typeof vi.fn>;
+  setMainAgent: ReturnType<typeof vi.fn>;
+} {
   return {
     load: vi.fn().mockResolvedValue({
       approvalMode: "manual",
@@ -210,6 +231,107 @@ describe("Agents surface — registry display", () => {
       );
     });
     expect(within(card).queryByText(/codex-cli/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Agents surface — settings failures (Main Agent UX)", () => {
+  it("shows an actionable error and retry when settings loading fails", async () => {
+    const settingsIpc = makeSettingsIpc();
+    settingsIpc.load.mockRejectedValueOnce({ kind: "storage", message: "db unavailable" });
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    await Promise.all([agentsStore.load(), settingsStore.load()]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("main-agent-error")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("db unavailable");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^None /)).toBeEnabled();
+    });
+  });
+
+  it("shows a save failure and preserves the previous preference", async () => {
+    const settingsIpc = makeSettingsIpc();
+    settingsIpc.setMainAgent.mockRejectedValueOnce({
+      kind: "storage",
+      message: "write failed",
+    });
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    await Promise.all([agentsStore.load(), settingsStore.load()]);
+    const group = screen.getByRole("group", { name: "Preferred Main Agent" });
+    await waitFor(() => expect(within(group).getByLabelText("Claude Code")).toBeEnabled());
+
+    fireEvent.click(within(group).getByLabelText("Claude Code"));
+    await waitFor(() => {
+      expect(screen.getByTestId("main-agent-action-error")).toHaveTextContent("write failed");
+    });
+    // The last valid preference (None) is preserved.
+    expect(settingsStore.getState().data.mainAgentId).toBeNull();
+    expect(within(group).getByLabelText(/^None /)).toBeChecked();
+  });
+
+  it("queues rapid selections in order so the last one wins", async () => {
+    const pending = deferred<Settings>();
+    const settingsIpc = makeSettingsIpc();
+    settingsIpc.setMainAgent.mockReturnValueOnce(pending.promise);
+    settingsIpc.setMainAgent.mockResolvedValueOnce({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: "codex",
+    });
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    await Promise.all([agentsStore.load(), settingsStore.load()]);
+    const group = screen.getByRole("group", { name: "Preferred Main Agent" });
+    await waitFor(() => expect(within(group).getByLabelText("Claude Code")).toBeEnabled());
+    fireEvent.click(within(group).getByLabelText("Claude Code")); // in flight
+    fireEvent.click(within(group).getByLabelText("OpenAI Codex CLI")); // queued
+    pending.resolve({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: "claude-code",
+    });
+
+    await waitFor(() => {
+      expect(settingsIpc.setMainAgent).toHaveBeenCalledTimes(2);
+    });
+    expect(settingsIpc.setMainAgent).toHaveBeenNthCalledWith(1, "claude-code");
+    expect(settingsIpc.setMainAgent).toHaveBeenNthCalledWith(2, "codex");
+    // Final state converges on the last-issued selection.
+    expect(settingsStore.getState().data.mainAgentId).toBe("codex");
+  });
+
+  it("keeps radios disabled while settings load (delayed load)", async () => {
+    let resolveLoad!: (value: Settings) => void;
+    const settingsIpc = makeSettingsIpc({
+      load: vi.fn().mockReturnValue(
+        new Promise<Settings>((resolve) => {
+          resolveLoad = resolve;
+        }),
+      ),
+    });
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    const settingsLoad = settingsStore.load(); // starts, hangs on the deferred IPC
+    await agentsStore.load();
+    await flush();
+    // Agents registry ready, settings still loading.
+    expect(screen.getByTestId("main-agent-loading")).toBeInTheDocument();
+    const group = screen.getByRole("group", { name: "Preferred Main Agent" });
+    expect(within(group).getByLabelText(/^None /)).toBeDisabled();
+
+    resolveLoad({
+      approvalMode: "manual",
+      maxRetry: 3,
+      telegramNotifications: true,
+      mainAgentId: null,
+    });
+    await settingsLoad;
+    await waitFor(() => {
+      expect(within(group).getByLabelText(/^None /)).toBeEnabled();
+    });
   });
 });
 

@@ -70,7 +70,17 @@ export function createSettingsStore(ipc: SettingsIpc): SettingsStore {
 
   async function update(input: SettingsInput): Promise<void> {
     return queue.run(async () => {
-    if (state.saving || state.phase !== "ready") return;
+    if (state.phase !== "ready") {
+      // No silent drops: the UI is disabled while unavailable, but a
+      // queued call that executes without state is reported.
+      setState({
+        actionError: {
+          kind: "storage",
+          message: "Settings are unavailable right now — retry loading first.",
+        },
+      });
+      return;
+    }
     if (input.approvalMode !== "manual" && input.approvalMode !== "autonomous") {
       setState({
         actionError: { kind: "invalid_input", message: "Approval mode must be manual or autonomous." },
@@ -102,7 +112,15 @@ export function createSettingsStore(ipc: SettingsIpc): SettingsStore {
 
   async function setMainAgent(agentId: string | null): Promise<void> {
     return queue.run(async () => {
-      if (state.saving || state.phase !== "ready") return;
+      if (state.phase !== "ready") {
+        setState({
+          actionError: {
+            kind: "storage",
+            message: "Settings are unavailable right now — retry loading first.",
+          },
+        });
+        return;
+      }
       setState({ saving: true, actionError: null });
       try {
         const stored = await ipc.setMainAgent(agentId);

@@ -37,6 +37,27 @@ Only observed results are recorded here — every entry lists the actual command
 
 Test-type transparency: Rust unit tests use **controlled fixture executables** (temp-dir shell scripts) for discovery and verification — no real third-party CLI is invoked in automated tests. The real Claude Code 2.1.316 evidence above comes from running the documented `--version` probe against the actually installed binary on this machine. Interactive GUI walkthrough of the Agents screen remains a manual checklist item.
 
+## Phase 3 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` | PASS — exit 0; **108/108 tests** |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust tests | `cargo test` | PASS — **67/67** (63 lib + 4 integration; incl. 9 verify-lifecycle tests) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` | PASS — real app binary ran cleanly (schema v2, data intact, 0 error lines) |
+| 7 | Non-blocking verification | async command + `spawn_blocking` + descendant test | PASS — verification of a script with a 30s pipe-holding descendant completed in <5s (the main-thread/freezing failure mode is structurally removed: the probe runs on a blocking worker, never the main thread); **on-screen responsiveness during a slow probe requires the manual checklist** |
+| 8 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+**Confirmed defects fixed (with regression tests):**
+
+1. **Blocking Tauri commands (Task 1):** `verify_agent` and `discover_agent` are now `async` and delegate the blocking work (process spawn/poll/drain, PATH walk) to `tauri::async_runtime::spawn_blocking` — the main thread and the async executor are never blocked. IPC input validation still happens synchronously before any work is queued. No database locks are held during verification (the probe never touches `DbState`).
+2. **Process lifecycle (Task 2):** the deadline now covers the entire lifecycle — after the direct child exits, output readers get a 1 s grace period; **descendants holding inherited pipes cannot hang verification** (regression test: a script with a 30 s pipe-holding descendant verifies in <5 s). Readers drain shared bounded buffers (first 64 KiB per stream kept) and are abandoned deliberately if a descendant keeps the pipes open (they exit when the pipes close; memory stays bounded). Repeated probes verified independent (5×). Timed-out children are killed and reaped; `KillOnDrop` covers normal shutdown paths — a hard process kill during an active probe can still orphan the (≤10 s) child, documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+3. **Windows semantics (Task 3):** the "no shell" claim is now platform-scoped — on Windows, `.cmd`/`.bat` targets execute through `cmd.exe` by OS design (Rust's hardened escaping applies; the argument list remains the single fixed `--version` literal, so no free-form input ever reaches the batch interpreter). `.exe` candidates are preferred. `#[cfg(windows)]` tests added (batch-file verification, candidate order) — **these compile on Windows only and could not be executed on this macOS machine**; marked unverified in the report.
+4. **Discovery truthfulness (Task 5):** on unix, discovery now requires the execute bit (permission bits) — a non-executable same-named file is skipped (regression test); symlinks to executables resolve and broken symlinks are skipped (regression tests). Windows continues to use the extension allowlist as its (documented, weaker) signal.
+5. **Main Agent UX (Task 4):** Agents screen shows settings loading ("Loading preferences…"), an actionable settings-error card with Retry, and save failures via `role="alert"` while preserving the last valid preference; the radios are disabled until settings load successfully. The settings store no longer silently drops updates — operations issued while saving are queued in order (last write wins) and unavailable-state operations surface an error. Regression tests: delayed load, failed load + retry, failed save + preservation, rapid ordered selections.
+
 ## Phase 2 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

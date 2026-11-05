@@ -4,14 +4,23 @@
 //! executable: `<resolved-path> --version`.
 //!
 //! Security boundaries:
-//! - No shell is involved: `std::process::Command` receives the resolved
-//!   path (found by our own discovery) and one allowlisted argument.
+//! - On unix, no shell is involved: `std::process::Command` receives the
+//!   resolved path (found by our own discovery) and one allowlisted
+//!   argument.
+//! - On Windows, `.cmd`/`.bat` targets are executed THROUGH `cmd.exe` by
+//!   the OS and the Rust runtime (see docs/ARCHITECTURE.md §Trust
+//!   boundaries). The injection surface stays closed because the argument
+//!   list is the single fixed `--version` literal and the path comes from
+//!   our own discovery — but "shell-free" must not be claimed
+//!   unconditionally on Windows. `.exe` candidates (checked first) do not
+//!   involve `cmd.exe`.
 //! - Arbitrary arguments, environment overrides, and custom commands are
 //!   impossible by construction — nothing user-supplied reaches the child.
 //! - Verification is explicit and user-initiated; discovery never probes.
-//! - The child is terminated on timeout (kill + reap); output is bounded
-//!   (first 64 KiB kept, the remainder drained) so a misbehaving binary
-//!   cannot hang or flood the app.
+//! - The child is terminated on timeout (kill + reap); the deadline
+//!   covers the whole lifecycle including output readers, so a descendant
+//!   holding inherited pipes cannot hang verification. Output is bounded
+//!   (first 64 KiB per stream kept, the remainder drained).
 //! - No authentication, login, model inference, or interactive session is
 //!   ever attempted.
 
@@ -25,6 +34,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 /// Polling interval while waiting for the child to exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Grace period for output readers after the direct child exits (a
+/// descendant holding the inherited pipes cannot extend the deadline).
+const READER_GRACE: Duration = Duration::from_millis(1000);
 /// Longest stderr excerpt kept for a failed probe.
 const MAX_ERROR_EXCERPT: usize = 200;
 
@@ -87,8 +99,10 @@ impl Drop for KillOnDrop {
 /// Verifies a discovered CLI by running `<path> --version`.
 ///
 /// The path comes from our own discovery (never from free-form user
-/// input) and the argument list is fixed. Output is bounded; a child
-/// that outlives `timeout` is killed and reaped.
+/// input) and the argument list is fixed. The deadline covers the whole
+/// lifecycle: after the direct child exits, output readers get a short
+/// grace period before the result is decided from what was captured —
+/// descendants that inherited the pipes cannot hang verification.
 pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyError> {
     let child = Command::new(path)
         .arg("--version")
@@ -103,11 +117,18 @@ pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyE
 
     let stdout = guarded.0.stdout.take().expect("stdout was piped");
     let stderr = guarded.0.stderr.take().expect("stderr was piped");
-    // Bounded readers: they stop after MAX_OUTPUT_BYTES so a flood cannot
-    // grow memory unbounded; the timeout below terminates a child that
-    // then blocks on a full pipe.
-    let stdout_reader = std::thread::spawn(move || read_bounded(stdout));
-    let stderr_reader = std::thread::spawn(move || read_bounded(stderr));
+    // Readers drain their pipes to EOF, keeping only the first
+    // MAX_OUTPUT_BYTES each, into shared buffers. They can never block
+    // verification: the main loop decides on the deadline regardless.
+    let shared = SharedOutput::default();
+    let stdout_reader = std::thread::spawn({
+        let shared = shared.clone();
+        move || read_into_shared(stdout, &shared, Stream::Stdout)
+    });
+    let stderr_reader = std::thread::spawn({
+        let shared = shared.clone();
+        move || read_into_shared(stderr, &shared, Stream::Stderr)
+    });
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -127,13 +148,18 @@ pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyE
             }
         }
     };
-    // Child exited (or we are past the check) — close the pipes.
-    let stdout_bytes = stdout_reader
-        .join()
-        .map_err(|_| VerifyError::MalformedOutput)?;
-    let stderr_bytes = stderr_reader
-        .join()
-        .map_err(|_| VerifyError::MalformedOutput)?;
+
+    // The direct child exited. Descendants may still hold the inherited
+    // pipes; give the readers a short grace period, then proceed with
+    // whatever was captured (the reader threads keep draining in the
+    // background, bounded, and end when the pipes close).
+    let grace_deadline = Instant::now() + READER_GRACE;
+    while !shared.readers_done() && Instant::now() < grace_deadline {
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    let _ = stdout_reader; // abandoned deliberately if pipes are still held
+    let _ = stderr_reader;
+    let (stdout_bytes, stderr_bytes) = shared.snapshot();
 
     if !status.success() {
         let code = status.code().unwrap_or(-1);
@@ -168,29 +194,69 @@ pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyE
     }
 }
 
-/// Reads a stream to EOF, keeping at most MAX_OUTPUT_BYTES.
-///
-/// Bytes beyond the cap are drained and discarded: stopping early would
-/// close the pipe and kill a writing child with SIGPIPE (and could lose
-/// the version line), while draining guarantees the child completes and
-/// the memory footprint stays bounded.
-fn read_bounded(mut stream: impl Read) -> Vec<u8> {
-    let mut kept = Vec::new();
+#[derive(Clone, Default)]
+struct SharedOutput {
+    inner: std::sync::Arc<std::sync::Mutex<OutputBuffers>>,
+}
+
+#[derive(Default)]
+struct OutputBuffers {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_done: bool,
+    stderr_done: bool,
+}
+
+impl SharedOutput {
+    fn append(&self, stream: Stream, chunk: &[u8]) {
+        let mut guard = self.inner.lock().expect("output lock");
+        let buffer = match stream {
+            Stream::Stdout => &mut guard.stdout,
+            Stream::Stderr => &mut guard.stderr,
+        };
+        let remaining = MAX_OUTPUT_BYTES as usize - buffer.len();
+        if remaining > 0 {
+            let end = chunk.len().min(remaining);
+            buffer.extend_from_slice(&chunk[..end]);
+        }
+    }
+
+    fn mark_done(&self, stream: Stream) {
+        let mut guard = self.inner.lock().expect("output lock");
+        match stream {
+            Stream::Stdout => guard.stdout_done = true,
+            Stream::Stderr => guard.stderr_done = true,
+        }
+    }
+
+    fn readers_done(&self) -> bool {
+        let guard = self.inner.lock().expect("output lock");
+        guard.stdout_done && guard.stderr_done
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, Vec<u8>) {
+        let guard = self.inner.lock().expect("output lock");
+        (guard.stdout.clone(), guard.stderr.clone())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Drains a pipe to EOF, retaining at most MAX_OUTPUT_BYTES per stream.
+fn read_into_shared(mut stream: impl Read, shared: &SharedOutput, stream_id: Stream) {
     let mut chunk = [0u8; 8192];
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => {
-                let remaining = MAX_OUTPUT_BYTES as usize - kept.len();
-                if remaining > 0 {
-                    let end = n.min(remaining);
-                    kept.extend_from_slice(&chunk[..end]);
-                }
-            }
+            Ok(n) => shared.append(stream_id, &chunk[..n]),
             Err(_) => break,
         }
     }
-    kept
+    shared.mark_done(stream_id);
 }
 
 #[cfg(test)]
@@ -210,6 +276,39 @@ mod tests {
         fs::write(&path, body).expect("write script");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
         path
+    }
+
+    // Windows-only: these run on Windows CI/development machines and are
+    // NOT verifiable on macOS — see docs/QA_REPORT.md for what remains
+    // unverified on this machine.
+    #[cfg(windows)]
+    #[test]
+    fn verifies_a_batch_file_cli_via_the_windows_path() {
+        let dir = temp_db_dir();
+        // .cmd runs through cmd.exe by OS design; the argument list is
+        // still the single fixed literal.
+        let path = dir.join("fake-cli.cmd");
+        std::fs::write(&path, "@echo fake-cli 1.2.3\r\n").expect("write cmd");
+        let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
+        assert_eq!(verified.version, "fake-cli 1.2.3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_candidates_prefer_exe_over_cmd_and_bat() {
+        // Order matters: .exe first so a native binary is preferred when
+        // all three exist.
+        let candidates =
+            crate::agents::discovery::candidates_for_platform(Path::new("C:\\Apps"), "fake-cli");
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["fake-cli", "fake-cli.exe", "fake-cli.cmd", "fake-cli.bat"]
+        );
     }
 
     #[cfg(unix)]
@@ -279,6 +378,40 @@ mod tests {
         );
         let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
         assert_eq!(verified.version, "flooding-cli 9.9.9");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendants_holding_pipes_cannot_hang_verification() {
+        let dir = temp_db_dir();
+        // Parent prints the version, then backgrounds a child that keeps
+        // the inherited stdout open for 30s and exits immediately.
+        let path = write_script(
+            &dir,
+            "descendant-cli",
+            "#!/bin/sh\necho \"descendant-cli 1.0.0\"\nsleep 30 &\nexit 0\n",
+        );
+        let started = Instant::now();
+        let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
+        assert_eq!(verified.version, "descendant-cli 1.0.0");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "verification must not wait for the descendant: {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_verifications_are_independent_and_clean() {
+        let dir = temp_db_dir();
+        let path = write_script(&dir, "steady-cli", "#!/bin/sh\necho \"steady 2.0\"\n");
+        for _ in 0..5 {
+            let verified = verify_cli(&path, Duration::from_secs(5)).expect("verify");
+            assert_eq!(verified.version, "steady 2.0");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
