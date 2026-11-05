@@ -46,6 +46,36 @@
   font-size: 13.5px;
 }
 
+.error-card {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--err-border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.error-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.error-card p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.error-card button {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
 .empty-state {
   margin-top: 20px;
   background: var(--surface);

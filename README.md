@@ -94,13 +94,14 @@ Module boundaries and planned modules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 | [docs/STATUS.md](docs/STATUS.md) | Current phase and progress |
 | [docs/QA_REPORT.md](docs/QA_REPORT.md) | Real verification results |
 
-## Current limitations (Phase 1)
+## Current limitations (Phase 2)
 
-- No agent integration, chat interface, orchestration, or persistence — these are later phases ([docs/ROADMAP.md](docs/ROADMAP.md)).
-- Projects and settings are **in-memory session state**: nothing survives an application restart until Phase 2 introduces SQLite.
-- Settings for Telegram notifications and autonomous execution are preferences only — neither integration is operational.
+- No agent integration, chat interface, or orchestration — these are later phases ([docs/ROADMAP.md](docs/ROADMAP.md)).
+- **Persistence is live**: projects, the selected project, and settings are stored in SQLite at the OS app-data directory (`~/Library/Application Support/io.github.shahid8142.orqen/` on macOS) via the Rust core — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the connection strategy, migrations, and backup notes (WAL side files).
+- Settings for Telegram notifications and autonomous execution are saved preferences only — neither integration is operational.
 - Agents and Workflows surfaces document planned capabilities; they contain no fake statuses or simulated agents.
 - The Overview surface reports only real runtime data (app name/version/platform, IPC round trip); if the backend is unavailable it shows an error state.
+- If the database is unreadable, Orqen fails safely: it never deletes or resets data and shows recovery guidance in the UI.
 - CI does not run a Windows job yet; Windows behavior is documented, not machine-verified in CI.
 - GitHub Actions execution is blocked by an external account-level billing restriction; CI has not yet produced a successful run (status and rerun path: [docs/QA_REPORT.md](docs/QA_REPORT.md)).
 

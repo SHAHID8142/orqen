@@ -1,114 +1,211 @@
 /**
- * Settings surface tests: preference controls work against a fresh
- * in-memory store and are labeled truthfully as preferences only.
+ * Settings surface tests against fake IPC: loading/error/retry states,
+ * persisted updates with the draft retry field, busy guards, and the
+ * truthful "preference only" labeling.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SettingsProvider } from "../../lib/settings/SettingsContext";
-import { createSettingsStore, type SettingsStore } from "../../lib/settings/store";
+import { createSettingsStore, type SettingsIpc } from "../../lib/settings/store";
 import SettingsSurface from "./SettingsSurface";
+import type { Settings } from "../../types/workspace";
 
-function renderSettings(store: SettingsStore = createSettingsStore()) {
-  return render(
+const DEFAULTS: Settings = {
+  approvalMode: "manual",
+  maxRetry: 3,
+  telegramNotifications: true,
+};
+
+function makeIpc(overrides: Partial<SettingsIpc> = {}): SettingsIpc & {
+  load: ReturnType<typeof vi.fn>;
+  update: ReturnType<typeof vi.fn>;
+} {
+  return {
+    load: vi.fn().mockResolvedValue(DEFAULTS),
+    update: vi.fn(),
+    ...overrides,
+  } as never;
+}
+
+function renderSettings(ipc: SettingsIpc) {
+  const store = createSettingsStore(ipc);
+  render(
     <SettingsProvider store={store}>
       <SettingsSurface />
     </SettingsProvider>,
   );
+  return { store, ipc };
 }
 
 afterEach(() => {
   cleanup();
 });
 
-describe("Settings surface", () => {
-  it("starts with the governance defaults and labels non-operational features", () => {
-    renderSettings();
+describe("Settings surface — persistence states", () => {
+  it("shows a loading state before settings arrive", () => {
+    renderSettings(makeIpc());
+    expect(screen.getByTestId("settings-loading")).toBeInTheDocument();
+  });
 
+  it("shows an error card with retry when loading fails", async () => {
+    const ipc = makeIpc();
+    ipc.load.mockRejectedValueOnce({ kind: "storage", message: "database unavailable" });
+    const { store } = renderSettings(ipc);
+    void store.load();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-error")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("database unavailable");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-state")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Settings surface — persisted updates", () => {
+  it("shows persisted defaults with truthful preference labeling", async () => {
+    const { store } = renderSettings(makeIpc());
+    await store.load();
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-state")).toHaveTextContent(
+        "approval mode: manual, maximum retry: 3, Telegram notifications: on",
+      );
+    });
     expect(screen.getByLabelText(/^Manual/)).toBeChecked();
-    expect(screen.getByLabelText(/^Autonomous/)).not.toBeChecked();
     expect(screen.getByText(/preference only; no orchestration/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Telegram notifications/)).toBeChecked();
-    expect(
-      screen.getByText(/Telegram is not connected yet/),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "approval mode: manual, maximum retry: 3, Telegram notifications: on",
-    );
+    expect(screen.getByText(/Telegram is not connected yet/)).toBeInTheDocument();
   });
 
-  it("switches the approval mode preference", () => {
-    renderSettings();
+  it("saves an approval-mode change and applies the stored result", async () => {
+    const stored: Settings = {
+      approvalMode: "autonomous",
+      maxRetry: 3,
+      telegramNotifications: true,
+    };
+    const ipc = makeIpc();
+    ipc.update.mockResolvedValue(stored);
+    const { store } = renderSettings(ipc);
+    await store.load();
+
     fireEvent.click(screen.getByLabelText(/^Autonomous/));
-    expect(screen.getByLabelText(/^Autonomous/)).toBeChecked();
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "approval mode: autonomous",
-    );
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-state")).toHaveTextContent(
+        "approval mode: autonomous",
+      );
+    });
+    expect(ipc.update).toHaveBeenCalledWith({
+      approvalMode: "autonomous",
+      maxRetry: 3,
+      telegramNotifications: true,
+    });
   });
 
-  it("lets the user type freely and commits the clamped value on blur", () => {
-    renderSettings();
-    const retryInput = screen.getByLabelText(/Maximum retry/);
+  it("lets the user type freely and commits the clamped value on blur", async () => {
+    const ipc = makeIpc();
+    ipc.update.mockImplementation(async (input: Settings) => Promise.resolve(input));
+    const { store } = renderSettings(ipc);
+    await store.load();
+    await waitFor(() => expect(screen.getByLabelText(/Maximum retry/)).toBeEnabled());
 
-    // Intermediate typing is shown as typed — never snapped back mid-edit.
+    const retryInput = screen.getByLabelText(/Maximum retry/);
     fireEvent.change(retryInput, { target: { value: "1" } });
     expect(retryInput).toHaveValue(1);
     fireEvent.change(retryInput, { target: { value: "12" } });
     expect(retryInput).toHaveValue(12);
 
     fireEvent.blur(retryInput);
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "maximum retry: 10",
-    );
-    expect(retryInput).toHaveValue(10);
+    await waitFor(() => {
+      expect(ipc.update).toHaveBeenCalledWith({
+        approvalMode: "manual",
+        maxRetry: 10,
+        telegramNotifications: true,
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-state")).toHaveTextContent("maximum retry: 10");
+    });
   });
 
-  it("can clear the field; an empty draft reverts instead of committing", () => {
-    renderSettings();
-    const retryInput = screen.getByLabelText(/Maximum retry/);
+  it("can clear the field; an empty draft reverts instead of committing", async () => {
+    const ipc = makeIpc();
+    const { store } = renderSettings(ipc);
+    await store.load();
+    await waitFor(() => expect(screen.getByLabelText(/Maximum retry/)).toBeEnabled());
 
+    const retryInput = screen.getByLabelText(/Maximum retry/);
     fireEvent.change(retryInput, { target: { value: "" } });
-    expect(retryInput).toHaveValue(null); // stays cleared while editing
-
+    expect(retryInput).toHaveValue(null);
     fireEvent.blur(retryInput);
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "maximum retry: 3",
-    );
-    expect(retryInput).toHaveValue(3);
+    expect(ipc.update).not.toHaveBeenCalled();
+    expect(screen.getByTestId("settings-state")).toHaveTextContent("maximum retry: 3");
   });
 
-  it("commits on Enter and reverts the draft on Escape", () => {
-    renderSettings();
-    const retryInput = screen.getByLabelText(/Maximum retry/);
+  it("commits on Enter and reverts the draft on Escape", async () => {
+    const ipc = makeIpc();
+    ipc.update.mockImplementation(async (input: Settings) => Promise.resolve(input));
+    const { store } = renderSettings(ipc);
+    await store.load();
+    await waitFor(() => expect(screen.getByLabelText(/Maximum retry/)).toBeEnabled());
 
+    const retryInput = screen.getByLabelText(/Maximum retry/);
     fireEvent.change(retryInput, { target: { value: "0" } });
     fireEvent.keyDown(retryInput, { key: "Enter" });
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "maximum retry: 1",
-    );
+    await waitFor(() => {
+      expect(ipc.update).toHaveBeenCalledWith({
+        approvalMode: "manual",
+        maxRetry: 1,
+        telegramNotifications: true,
+      });
+    });
 
     fireEvent.change(retryInput, { target: { value: "9" } });
     fireEvent.keyDown(retryInput, { key: "Escape" });
     fireEvent.blur(retryInput);
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "maximum retry: 1",
-    );
+    expect(ipc.update).toHaveBeenCalledTimes(1);
   });
 
-  it("toggles Telegram notifications and restores defaults", () => {
-    renderSettings();
-    const telegram = screen.getByLabelText(/Telegram notifications/);
+  it("shows a backend failure without losing previous values", async () => {
+    const ipc = makeIpc();
+    ipc.update.mockRejectedValue({ kind: "storage", message: "write failed" });
+    const { store } = renderSettings(ipc);
+    await store.load();
+    await waitFor(() => expect(screen.getByLabelText(/Maximum retry/)).toBeEnabled());
 
-    fireEvent.click(telegram);
-    expect(telegram).not.toBeChecked();
+    fireEvent.click(screen.getByLabelText(/Telegram notifications/));
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-action-error")).toHaveTextContent("write failed");
+    });
     expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "Telegram notifications: off",
+      "Telegram notifications: on",
     );
+    expect(screen.getByLabelText(/Telegram notifications/)).toBeChecked();
+  });
+
+  it("restores defaults persistently", async () => {
+    const current: Settings = {
+      approvalMode: "autonomous",
+      maxRetry: 9,
+      telegramNotifications: false,
+    };
+    const ipc = makeIpc({ load: vi.fn().mockResolvedValue(current) });
+    const defaults: Settings = { ...DEFAULTS };
+    ipc.update.mockResolvedValue(defaults);
+    const { store } = renderSettings(ipc);
+    await store.load();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Restore defaults" })).toBeEnabled());
 
     fireEvent.click(screen.getByRole("button", { name: "Restore defaults" }));
-    expect(telegram).toBeChecked();
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "approval mode: manual, maximum retry: 3, Telegram notifications: on",
-    );
+    await waitFor(() => {
+      expect(ipc.update).toHaveBeenCalledWith(defaults);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-state")).toHaveTextContent(
+        "approval mode: manual, maximum retry: 3, Telegram notifications: on",
+      );
+    });
   });
 });

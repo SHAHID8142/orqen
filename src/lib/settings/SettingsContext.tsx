@@ -5,12 +5,16 @@ import { createContext, useContext, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { createSettingsStore, type SettingsStore } from "./store";
 import type { SettingsState } from "./types";
+import { fetchSettings, updateSettingsRequest } from "../ipc/settings";
 
 const SettingsContext = createContext<SettingsStore | null>(null);
 
 /** Creates the store instance used for the application lifetime. */
 export function createAppSettingsStore(): SettingsStore {
-  return createSettingsStore();
+  return createSettingsStore({
+    load: fetchSettings,
+    update: updateSettingsRequest,
+  });
 }
 
 export function SettingsProvider({

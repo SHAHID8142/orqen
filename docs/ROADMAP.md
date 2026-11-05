@@ -30,11 +30,16 @@ Multi-module shell (state-based navigation per [ARCHITECTURE.md §Module boundar
 - [x] Navigation state survives app restart **not** required (in-memory by design, documented).
 
 ## Phase 2 — Local Persistence (SQLite) & Settings
-Priority P0 | Dependencies: Phase 1
+**Status: delivered (Feature 001, 2026-11-05)** | Priority P0 | Dependencies: Phase 1
 
-SQLite store in the Rust core ([ARCHITECTURE.md §Future expansion](ARCHITECTURE.md)), migrations strategy, settings persistence, project/task/chunk record schema foundations, encrypted-at-rest consideration documented.
+SQLite store in the Rust core ([ARCHITECTURE.md §Persistence architecture](ARCHITECTURE.md), D-014), transactional migrations, settings persistence, project/selection records, failure-safe initialization.
 
-**Acceptance criteria:** data survives app restart; DB file lives in app data dir, gitignored; all access flows through Rust commands (no WebView DB access); schema migrations tested.
+**Acceptance criteria:**
+- [x] Data survives app restart (projects, selection, settings — Rust reopen tests + real-launch restart probe with an externally seeded row).
+- [x] DB file lives in the app data dir, gitignored; never in the repository.
+- [x] All access flows through validated Rust commands (parameterized SQL; WebView never touches the DB).
+- [x] Schema migrations: versioned (`PRAGMA user_version`), transactional, idempotent, rollback tested.
+- [x] Failure handling: corrupt/unreadable databases surface errors with recovery guidance and are never auto-reset; failed init keeps a retry path (no in-memory fallback).
 
 ## Phase 3 — Agent Registry & Adapters
 Priority P1 | Dependencies: Phase 2

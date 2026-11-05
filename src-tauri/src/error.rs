@@ -3,8 +3,7 @@
 //! Convention (see `docs/ARCHITECTURE.md`): every command returns
 //! `CommandResult<T>`. Errors are serialized to the frontend as a
 //! discriminated payload so the UI can distinguish recoverable input
-//! problems from other failures. Add new variants here as commands grow;
-//! the frontend normalizer already treats unknown payloads as internal.
+//! problems from storage failures and unknown errors.
 
 use serde::Serialize;
 use std::fmt;
@@ -14,12 +13,16 @@ use std::fmt;
 pub enum CommandError {
     /// The caller supplied invalid input. Recoverable; safe to show to the user.
     InvalidInput(String),
+    /// A local-database operation failed. User data is not destroyed; the
+    /// message carries user-understandable context without raw internals.
+    Storage(String),
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput(message) => write!(f, "invalid input: {message}"),
+            Self::Storage(message) => write!(f, "storage error: {message}"),
         }
     }
 }
@@ -39,6 +42,10 @@ impl Serialize for CommandError {
         let payload = match self {
             Self::InvalidInput(message) => CommandErrorPayload {
                 kind: "invalid_input",
+                message: message.clone(),
+            },
+            Self::Storage(message) => CommandErrorPayload {
+                kind: "storage",
                 message: message.clone(),
             },
         };

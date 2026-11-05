@@ -38,8 +38,8 @@ Frontend modules (`src/`):
 | `app/` | Application shell (`AppShell`, `SidebarNav`), navigation model (`views.ts`), provider composition | contain feature logic |
 | `features/<name>/` | One user-facing feature per folder (overview, projects, agents, workflows, settings), self-contained with colocated CSS | import across features (extract to `lib/` instead) |
 | `components/` | Shared presentational components (none yet — create only when genuinely reused) | fetch data or hold domain state |
-| `lib/workspace/` | In-memory project store: types, validation, observable store, React context | know about specific views |
-| `lib/settings/` | In-memory preference store: same pattern as workspace | persist anything (Phase 2 scope) |
+| `lib/workspace/` | Workspace store: loading/ready/error phases, snapshot convergence, observable store, React context | touch SQLite directly (IPC only) |
+| `lib/settings/` | Settings store: same pattern as workspace | claim operational integrations (preferences only) |
 | `lib/ipc/` | All `invoke()` calls, payload typing, error normalization | be bypassed by feature code calling `invoke` directly |
 | `lib/` | Shared frontend logic/utilities | know about specific features |
 | `types/` | Cross-module domain types mirroring Rust payloads | contain logic |
@@ -53,11 +53,31 @@ Rust modules (`src-tauri/src/`):
 | Module | Owns |
 | --- | --- |
 | `commands/` | Tauri command handlers — input validation, orchestration of core logic |
-| `error.rs` | `CommandError` / `CommandResult` — the single error contract |
-| future: `store/` | SQLite persistence (Phase 2+) |
+| `commands/workspace.rs` | Persistent project operations; every mutation returns a fresh snapshot |
+| `commands/settings.rs` | Persistent settings load/update |
+| `error.rs` | `CommandError` — the single error contract (`invalid_input` / `storage`) |
+| `db/` | SQLite ownership: connection strategy, transactional migrations, `DbState` |
 | future: `agents/` | Adapter/runtime management (Phase 3+) |
 
-Dependency rule: **no circular dependencies** — `commands` may use `error` and future core modules; nothing depends on `commands`. Frontend mirrors it: features depend on `lib`, never the reverse.
+Dependency rule: **no circular dependencies** — `commands` may use `db` and `error`; nothing depends on `commands`. Frontend mirrors it: features depend on `lib`, never the reverse.
+
+## 2.1 Persistence architecture (Phase 2)
+
+- **Ownership:** SQLite is accessed exclusively by Rust (`rusqlite`, `bundled` feature). The WebView never touches the database ([AGENTS.md §Security rules](../AGENTS.md)).
+- **Location:** the database lives at `<app-data-dir>/orqen.sqlite3`, where the app-data dir is Tauri's OS-managed location for the identifier `io.github.shahid8142.orqen` (macOS: `~/Library/Application Support/io.github.shahid8142.orqen/`). Never inside the repository.
+- **Connection strategy:** one connection behind a mutex (`DbState`), serialized commands; `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`, `busy_timeout` 5 s. If initialization fails, `DbState` stays empty and every command returns a `storage` error with a retry path — **there is no in-memory fallback**.
+- **Migrations:** versioned and transactional (`db/migrations.rs`); the applied count is recorded in `PRAGMA user_version`. Each migration runs in its own transaction — a failure rolls back schema *and* version, and the next launch retries. Re-running is a no-op; existing data is never recreated. Current version: **1** (projects table + settings singleton with CHECK constraints and the selection foreign key).
+- **Snapshot convergence:** `load_workspace`, `create_project`, `select_project`, `delete_project` all return the full workspace snapshot; `load_settings` / `update_settings` return the stored settings. The React stores apply these snapshots verbatim — UI and database cannot diverge.
+- **Selected project ownership:** `settings.selected_project_id` references `projects(id) ON DELETE SET NULL` — deleting the selected project clears the selection at the database level.
+- **Failure handling:** corrupt/unreadable databases fail the open with a user-understandable message and are **never** deleted or reset. Recovery guidance: quit the app, back up the three `orqen.sqlite3*` files, then restore or relocate; the app recreates an empty database only if the file is absent.
+
+### WAL consistency & backup notes
+
+WAL mode keeps recent writes in `orqen.sqlite3-wal` (plus an `orqen.sqlite3-shm` index). A copy of only the main file can miss recent commits — to back up safely, either copy all three files while the app is closed, or run `VACUUM INTO 'backup.sqlite3'` (via the `sqlite3` CLI) to produce a single consistent snapshot. Backups are a manual user action; Orqen performs none automatically (no destructive automation).
+
+### Future task/chunk schema (documented, not implemented)
+
+Task/chunk records (Phase 7) will require: id, project FK (cascade), title/description, status enum with CHECK, acceptance criteria, assignment, audit/verification results, and timestamps. The migration strategy stays the same: append a `MIGRATIONS` entry (v2+) describing additive `CREATE TABLE`/`ALTER TABLE` steps; existing tables are never rewritten, and fresh databases apply all migrations in order on first run. No speculative tables or APIs exist today.
 
 ## 3. Trust boundaries
 
@@ -92,7 +112,7 @@ All cross-boundary payloads use camelCase JSON; their TypeScript mirrors live in
 
 Phases (details and acceptance criteria in [ROADMAP.md](ROADMAP.md)) add modules **without changing existing boundaries**:
 
-- Phase 2 adds `store/` (SQLite) behind core interfaces; commands mediate all access — the WebView never touches the DB.
+- Phase 2 ✅ added `db/` (SQLite via rusqlite) with commands mediating all access — the WebView never touches the database.
 - Phase 3 adds `agents/` with adapters as isolated child processes; the frontend learns agents only through commands.
 - Phase 9 adds Telegram via a Rust-side service; notifications are read-only summaries; approvals round-trip into the same execution-control state machine.
 

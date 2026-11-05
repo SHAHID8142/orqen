@@ -8,12 +8,18 @@ import { createContext, useContext, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { createWorkspaceStore, type WorkspaceStore } from "./store";
 import type { WorkspaceState } from "./types";
+import { fetchWorkspaceSnapshot, createProjectRequest, selectProjectRequest, deleteProjectRequest } from "../ipc/workspace";
 
 const WorkspaceContext = createContext<WorkspaceStore | null>(null);
 
 /** Creates the store instance used for the application lifetime. */
 export function createAppWorkspaceStore(): WorkspaceStore {
-  return createWorkspaceStore();
+  return createWorkspaceStore({
+    load: fetchWorkspaceSnapshot,
+    create: createProjectRequest,
+    select: selectProjectRequest,
+    remove: deleteProjectRequest,
+  });
 }
 
 export function WorkspaceProvider({
@@ -28,7 +34,7 @@ export function WorkspaceProvider({
   );
 }
 
-/** Accesses the workspace store; state updates re-render the caller. */
+/** Accesses the workspace state; updates re-render the caller. */
 export function useWorkspace(): WorkspaceState {
   const store = useContext(WorkspaceContext);
   if (!store) {

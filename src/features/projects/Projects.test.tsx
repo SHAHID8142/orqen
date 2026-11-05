@@ -1,213 +1,252 @@
 /**
- * Projects surface tests: creation, validation, selection, deletion with
- * confirmation, and empty states — against a fresh in-memory store.
+ * Projects surface tests against fake IPC: loading/error/retry states,
+ * persistent create/select/delete flows, focus management and busy guards.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { WorkspaceProvider } from "../../lib/workspace/WorkspaceContext";
-import { createWorkspaceStore, type WorkspaceStore } from "../../lib/workspace/store";
+import {
+  createWorkspaceStore,
+  type WorkspaceIpc,
+} from "../../lib/workspace/store";
 import Projects from "./Projects";
+import type { WorkspaceSnapshot } from "../../types/workspace";
 
-function renderProjects(store: WorkspaceStore = createWorkspaceStore()) {
-  return render(
+function snapshot(
+  projects: Array<{ id: string; name: string }>,
+  selectedProjectId: string | null = null,
+): WorkspaceSnapshot {
+  return {
+    projects: projects.map((p) => ({ ...p, createdAt: "2026-01-01T00:00:00Z" })),
+    selectedProjectId,
+  };
+}
+
+function makeIpc(overrides: Partial<WorkspaceIpc> = {}): WorkspaceIpc & {
+  load: ReturnType<typeof vi.fn>;
+  create: ReturnType<typeof vi.fn>;
+  select: ReturnType<typeof vi.fn>;
+  remove: ReturnType<typeof vi.fn>;
+} {
+  return {
+    load: vi.fn().mockResolvedValue(snapshot([])),
+    create: vi.fn(),
+    select: vi.fn(),
+    remove: vi.fn(),
+    ...overrides,
+  } as never;
+}
+
+function renderProjects(ipc: WorkspaceIpc) {
+  const store = createWorkspaceStore(ipc);
+  render(
     <WorkspaceProvider store={store}>
       <Projects />
     </WorkspaceProvider>,
   );
+  return { store, ipc };
 }
 
 afterEach(() => {
   cleanup();
 });
 
-describe("Projects surface", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("shows the empty state when no projects exist", () => {
-    renderProjects();
-    expect(screen.getByTestId("projects-empty")).toHaveTextContent(
-      "No projects yet",
+describe("Projects surface — persistence states", () => {
+  it("shows a loading state before the snapshot arrives", () => {
+    const ipc = makeIpc();
+    renderProjects(ipc);
+    expect(screen.getByTestId("projects-loading")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Projects" })).toHaveAttribute(
+      "tabindex",
+      "-1",
     );
-    expect(screen.getByLabelText("New project name")).toBeInTheDocument();
   });
 
-  it("creates a project, selects it, and announces it", () => {
-    renderProjects();
+  it("shows an error card with retry when loading fails, then recovers", async () => {
+    const ipc = makeIpc();
+    ipc.load.mockRejectedValueOnce({ kind: "storage", message: "database unavailable" });
+    const { store } = renderProjects(ipc);
+    void store.load();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-error")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("database unavailable");
+    expect(screen.queryByLabelText("New project name")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Projects surface — persistent operations", () => {
+  it("shows the empty state when no projects exist", async () => {
+    const { store } = renderProjects(makeIpc());
+    await store.load();
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("New project name")).toBeEnabled();
+  });
+
+  it("creates a project persistently, selects it, and announces it", async () => {
+    const ipc = makeIpc();
+    ipc.create.mockResolvedValue(snapshot([{ id: "p1", name: "Demo App" }], "p1"));
+    const { store } = renderProjects(ipc);
+    await store.load();
+
     fireEvent.change(screen.getByLabelText("New project name"), {
       target: { value: "  Demo App  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
-    const list = screen.getByRole("list", { name: "Projects" });
-    expect(within(list).getByText("Demo App")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-note")).toHaveTextContent(
+        "Active project: Demo App",
+      );
+    });
+    expect(ipc.create).toHaveBeenCalledWith("Demo App");
+    expect(screen.getByRole("status")).toHaveTextContent(/Project "Demo App" created/);
+    expect(screen.getByLabelText("New project name")).toHaveValue("");
     expect(screen.getByRole("button", { name: "Demo App" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    expect(screen.getByTestId("selected-note")).toHaveTextContent(
-      "Active project: Demo App",
-    );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      /Project "Demo App" created/,
-    );
-    expect(screen.getByLabelText("New project name")).toHaveValue("");
   });
 
-  it("rejects empty names with a visible alert and keeps the input", () => {
-    renderProjects();
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+  it("clears the input only when creation succeeds", async () => {
+    const ipc = makeIpc({ load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Demo" }])) });
+    const { store } = renderProjects(ipc);
+    await store.load();
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Project name must not be empty.",
-    );
-    expect(screen.queryByRole("list", { name: "Projects" })).not.toBeInTheDocument();
-  });
-
-  it("rejects duplicate names", () => {
-    renderProjects();
     fireEvent.change(screen.getByLabelText("New project name"), {
       target: { value: "Demo" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "  Demo  " },
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/already exists/);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-
-    // Uniqueness compares trimmed names exactly (case-sensitive by design).
-    expect(screen.getByRole("alert")).toHaveTextContent(/already exists/);
+    expect(screen.getByLabelText("New project name")).toHaveValue("Demo");
   });
 
-  it("supports multiple projects and explicit selection", () => {
-    renderProjects();
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "A" },
+  it("shows a backend create failure without losing state", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Kept" }])),
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "B" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    ipc.create.mockRejectedValue({ kind: "storage", message: "write failed" });
+    const { store } = renderProjects(ipc);
+    await store.load();
 
-    // B was auto-selected on creation; switch back to A.
+    fireEvent.change(screen.getByLabelText("New project name"), {
+      target: { value: "Broken" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("write failed");
+    });
+    expect(screen.getByRole("button", { name: "Kept" })).toBeInTheDocument();
+  });
+
+  it("supports selection through the persisted store", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(
+        snapshot(
+          [
+            { id: "p1", name: "A" },
+            { id: "p2", name: "B" },
+          ],
+          "p2",
+        ),
+      ),
+    });
+    ipc.select.mockResolvedValue(
+      snapshot(
+        [
+          { id: "p1", name: "A" },
+          { id: "p2", name: "B" },
+        ],
+        "p1",
+      ),
+    );
+    const { store } = renderProjects(ipc);
+    await store.load();
+
     fireEvent.click(screen.getByRole("button", { name: "A" }));
-    expect(screen.getByTestId("selected-note")).toHaveTextContent(
-      "Active project: A",
-    );
-    expect(screen.getByRole("button", { name: "A" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByRole("button", { name: "B" })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-note")).toHaveTextContent(
+        "Active project: A",
+      );
+    });
+    expect(ipc.select).toHaveBeenCalledWith("p1");
   });
+});
 
-  it("deletes a project only after inline confirmation", () => {
-    const store = createWorkspaceStore();
-    renderProjects(store);
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "Doomed" },
+describe("Projects surface — delete focus management", () => {
+  it("deletes only after confirmation and focuses a surviving element", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(
+        snapshot(
+          [
+            { id: "p1", name: "A" },
+            { id: "p2", name: "B" },
+          ],
+          "p1",
+        ),
+      ),
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-
-    fireEvent.click(screen.getByRole("button", { name: "Delete project Doomed" }));
-
-    const confirm = screen.getByRole("group", {
-      name: "Confirm deleting Doomed",
-    });
-    expect(confirm).toHaveTextContent("This cannot be undone");
-
-    // Cancel keeps the project.
-    fireEvent.click(within(confirm).getByRole("button", { name: "Cancel" }));
-    expect(screen.getByRole("list", { name: "Projects" })).toBeInTheDocument();
-
-    // Confirm removes it and returns to the empty state.
-    fireEvent.click(screen.getByRole("button", { name: "Delete project Doomed" }));
-    fireEvent.click(
-      within(
-        screen.getByRole("group", { name: "Confirm deleting Doomed" }),
-      ).getByRole("button", { name: "Delete" }),
-    );
-    expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent(/deleted/);
-  });
-
-  it("moves focus to Cancel when the delete confirmation appears", () => {
-    renderProjects();
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "Doomed" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete project Doomed" }));
-
-    expect(document.activeElement).toHaveTextContent("Cancel");
-  });
-
-  it("restores focus to the item's Delete button when cancellation is chosen", () => {
-    renderProjects();
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "Doomed" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete project Doomed" }));
-
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    expect(
-      screen.queryByRole("group", { name: "Confirm deleting Doomed" }),
-    ).not.toBeInTheDocument();
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Delete project Doomed" }),
-    );
-  });
-
-  it("focuses the first surviving project after a confirmed deletion", () => {
-    renderProjects();
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "A" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "B" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    ipc.remove.mockResolvedValue(snapshot([{ id: "p2", name: "B" }]));
+    const { store } = renderProjects(ipc);
+    await store.load();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete project A" }));
-    fireEvent.click(
-      within(
-        screen.getByRole("group", { name: "Confirm deleting A" }),
-      ).getByRole("button", { name: "Delete" }),
-    );
+    // Focus lands on Cancel (the safe choice).
+    expect(document.activeElement).toHaveTextContent("Cancel");
 
-    expect(screen.queryByRole("button", { name: "A" })).not.toBeInTheDocument();
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "B" }),
+    // Cancel keeps the project and restores focus to the Delete button.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Delete project A" }),
+      );
+    });
+
+    // Confirm: backend snapshot applied, focus on the surviving project.
+    fireEvent.click(screen.getByRole("button", { name: "Delete project A" }));
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "Confirm deleting A" })).getByRole(
+        "button",
+        { name: "Delete" },
+      ),
     );
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(/deleted/);
+    });
+    expect(screen.getByRole("button", { name: "B" })).toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "B" }));
   });
 
-  it("focuses the name input when the last project is deleted", () => {
-    renderProjects();
-    fireEvent.change(screen.getByLabelText("New project name"), {
-      target: { value: "Only" },
+  it("focuses the name input when the last project is deleted", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Only" }])),
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    ipc.remove.mockResolvedValue(snapshot([]));
+    const { store } = renderProjects(ipc);
+    await store.load();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete project Only" }));
     fireEvent.click(
-      within(
-        screen.getByRole("group", { name: "Confirm deleting Only" }),
-      ).getByRole("button", { name: "Delete" }),
+      within(screen.getByRole("group", { name: "Confirm deleting Only" })).getByRole(
+        "button",
+        { name: "Delete" },
+      ),
     );
 
-    expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
-    expect(document.activeElement).toBe(
-      screen.getByLabelText("New project name"),
-    );
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+    });
+    expect(document.activeElement).toBe(screen.getByLabelText("New project name"));
   });
 });

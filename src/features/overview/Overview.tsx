@@ -21,8 +21,8 @@ type RuntimeState =
 
 /** Capabilities actually implemented in this build. */
 const IMPLEMENTED: readonly string[] = [
+  "SQLite persistence — projects, selection and settings survive restarts",
   "Workspace shell with sidebar navigation (Overview, Projects, Agents, Workflows, Settings)",
-  "In-memory project management and preferences (session-only until Phase 2)",
   "Desktop application shell (Tauri 2 + React + TypeScript)",
   "Rust core with structured IPC commands and quality gates",
 ];
@@ -32,7 +32,7 @@ const PLANNED: readonly string[] = [
   "Agent registry and provider adapters (Phase 3)",
   "Chat, interview and orchestration (Phases 4–6)",
   "Workflow execution and task chunking (Phase 7)",
-  "SQLite persistence (Phase 2) and Telegram remote access (Phase 10)",
+  "Telegram remote access (Phase 10)",
 ];
 
 function Overview() {

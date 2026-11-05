@@ -4,3 +4,5 @@
 //! `crate::run()` via `tauri::generate_handler!`.
 
 pub mod app_info;
+pub mod settings;
+pub mod workspace;

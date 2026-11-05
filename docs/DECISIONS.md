@@ -68,3 +68,14 @@ Format per [COMMUNICATION.md §2.4](COMMUNICATION.md). New entries append at the
 **Context:** Phase 1 required navigation across five fixed surfaces and in-memory workspace/settings state without new dependencies.
 **Decision:** (1) View switching is state-based (`ViewId` in `src/app/views.ts`, rendered by `AppShell`) — no router dependency; deep links are not a Phase 1 requirement. Revisit via a new decision if URL-addressable views become necessary. (2) Domain state lives in small framework-agnostic observable stores (`src/lib/workspace`, `src/lib/settings`) bound to React via `useSyncExternalStore` + context providers; stores are injectable into `App` for tests. (3) All workspace/settings state is in-memory session state only — persistence is Phase 2 scope and the UI says so.
 **Consequences:** zero new runtime dependencies; navigation semantics tested via `aria-current` and heading focus; restart persistence is explicitly not claimed anywhere in the UI.
+
+## D-014 | 2026-11-05 | APPROVED — SQLite persistence stack (Phase 2)
+**Context:** Phase 2 required reliable local-first persistence for projects, the selection and settings, owned by Rust, with minimal dependencies.
+**Decision:**
+- `rusqlite` with the `bundled` feature (SQLite compiled into the binary — no system library dependency, identical behavior on macOS and Windows).
+- One connection behind a managed mutex (`DbState`); `journal_mode=WAL` + `synchronous=NORMAL` + `foreign_keys=ON` + `busy_timeout` 5 s.
+- Hand-rolled transactional migrations over `PRAGMA user_version` (per-migration transaction, rollback on failure, re-run safe) instead of the `rusqlite::migration` helper — full control for rollback testing.
+- Selection state lives in `settings.selected_project_id` with `REFERENCES projects(id) ON DELETE SET NULL`.
+- `uuid` v4 for project IDs, `time` (RFC 3339) for timestamps.
+- New dependencies: `rusqlite`, `uuid`, `time` (Rust side only; no new npm dependencies).
+**Consequences:** database files live in the OS app-data directory and are gitignored; corrupted databases fail closed with recovery guidance (never auto-reset); the frontend receives full snapshots from every mutation, keeping UI and database converged.

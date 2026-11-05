@@ -17,7 +17,7 @@ export interface AppInfo {
 }
 
 /** Severity-free discriminators for structured errors returned by Tauri commands. */
-export type CommandErrorKind = "invalid_input" | "internal";
+export type CommandErrorKind = "invalid_input" | "storage" | "internal";
 
 /**
  * Shape of the error payload returned by Rust commands.

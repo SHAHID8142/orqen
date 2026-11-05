@@ -1,119 +1,250 @@
 /**
- * Unit tests for the in-memory workspace store (no React involved).
+ * Unit tests for the persistent workspace store against fake IPC surfaces
+ * (deferred promises control timing; the store logic runs for real).
  */
 import { describe, expect, it, vi } from "vitest";
-import { createWorkspaceStore, validateProjectName } from "./store";
+import { createWorkspaceStore, type WorkspaceIpc } from "./store";
 import { MAX_PROJECT_NAME_LENGTH } from "./types";
+import type { WorkspaceSnapshot } from "../../types/workspace";
 
-describe("validateProjectName", () => {
-  it("accepts a normal name", () => {
-    expect(validateProjectName("My App", [])).toBeNull();
+function snapshot(
+  projects: Array<{ id: string; name: string }>,
+  selectedProjectId: string | null = null,
+): WorkspaceSnapshot {
+  return {
+    projects: projects.map((p) => ({ ...p, createdAt: "2026-01-01T00:00:00Z" })),
+    selectedProjectId,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeIpc(overrides: Partial<WorkspaceIpc> = {}): WorkspaceIpc & {
+  load: ReturnType<typeof vi.fn>;
+  create: ReturnType<typeof vi.fn>;
+  select: ReturnType<typeof vi.fn>;
+  remove: ReturnType<typeof vi.fn>;
+} {
+  return {
+    load: vi.fn().mockResolvedValue(snapshot([])),
+    create: vi.fn(),
+    select: vi.fn(),
+    remove: vi.fn(),
+    ...overrides,
+  } as never;
+}
+
+describe("workspace store — loading", () => {
+  it("starts in the loading phase with empty data", () => {
+    const store = createWorkspaceStore(makeIpc());
+    expect(store.getState().phase).toBe("loading");
+    expect(store.getState().data).toEqual({ projects: [], selectedProjectId: null });
   });
 
-  it("rejects empty and whitespace-only names", () => {
-    expect(validateProjectName("", [])).toBe("empty");
-    expect(validateProjectName("   ", [])).toBe("empty");
+  it("applies the backend snapshot on successful load", async () => {
+    const ipc = makeIpc({ load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Demo" }])) });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+    expect(store.getState().phase).toBe("ready");
+    expect(store.getState().data.projects).toHaveLength(1);
+    expect(store.getState().loadError).toBeNull();
   });
 
-  it("rejects names beyond the code-point limit", () => {
-    expect(validateProjectName("a".repeat(MAX_PROJECT_NAME_LENGTH + 1), [])).toBe(
-      "too_long",
-    );
-    // Regression for D-012: 60 emoji are 120 UTF-16 units but 60 code points.
-    expect(validateProjectName("🙂".repeat(60), [])).toBeNull();
+  it("enters the error phase on first-load failure and recovers on retry", async () => {
+    const ipc = makeIpc();
+    ipc.load.mockRejectedValueOnce({ kind: "storage", message: "db unavailable" });
+    const store = createWorkspaceStore(ipc);
+
+    await store.load();
+    expect(store.getState().phase).toBe("error");
+    expect(store.getState().loadError).toEqual({ kind: "storage", message: "db unavailable" });
+
+    // Retry path: the same load action recovers.
+    ipc.load.mockResolvedValueOnce(snapshot([{ id: "p1", name: "Recovered" }]));
+    await store.load();
+    expect(store.getState().phase).toBe("ready");
+    expect(store.getState().data.projects[0]?.name).toBe("Recovered");
+    expect(store.getState().loadError).toBeNull();
   });
 
-  it("rejects duplicate names after trimming", () => {
-    const existing = [
-      { id: "p1", name: "Orqen Demo", createdAt: new Date().toISOString() },
-    ];
-    expect(validateProjectName("  Orqen Demo  ", existing)).toBe("duplicate");
+  it("keeps the previous valid state when a reload fails after being ready", async () => {
+    const ipc = makeIpc({ load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Kept" }])) });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    ipc.load.mockRejectedValueOnce({ kind: "storage", message: "later failure" });
+    await store.load();
+    expect(store.getState().phase).toBe("ready");
+    expect(store.getState().data.projects[0]?.name).toBe("Kept");
+    expect(store.getState().loadError?.kind).toBe("storage");
   });
 
-  it("accepts Bangla and emoji names", () => {
-    expect(validateProjectName("বাংলা প্রজেক্ট", [])).toBeNull();
-    expect(validateProjectName("🙂👍🏽 project", [])).toBeNull();
+  it("does not issue duplicate loads while one is in flight", async () => {
+    const pending = deferred<WorkspaceSnapshot>();
+    const ipc = makeIpc({ load: vi.fn().mockReturnValue(pending.promise) });
+    const store = createWorkspaceStore(ipc);
+
+    const first = store.load();
+    const second = store.load();
+    pending.resolve(snapshot([]));
+    await Promise.all([first, second]);
+    expect(ipc.load).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("createWorkspaceStore", () => {
-  it("starts empty with no selection", () => {
-    const store = createWorkspaceStore();
-    expect(store.getState()).toEqual({ projects: [], selectedProjectId: null });
+describe("workspace store — create", () => {
+  it("rejects invalid names client-side without invoking the backend", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Demo" }])),
+    });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    await store.create("   ");
+    await store.create("a".repeat(MAX_PROJECT_NAME_LENGTH + 1));
+    await store.create("Demo"); // duplicate against loaded data
+    expect(ipc.create).not.toHaveBeenCalled();
+    expect(store.getState().actionError?.kind).toBe("invalid_input");
   });
 
-  it("creates a trimmed project and selects it", () => {
-    const store = createWorkspaceStore();
-    const result = store.createProject("  Demo  ");
-    expect(result).toEqual({
-      ok: true,
-      project: { id: expect.any(String), name: "Demo", createdAt: expect.any(String) },
-    });
+  it("applies the backend snapshot after a successful create", async () => {
+    const pending = deferred<WorkspaceSnapshot>();
+    const ipc = makeIpc();
+    ipc.create.mockReturnValue(pending.promise);
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    const run = store.create("Alpha");
+    await vi.waitFor(() => expect(store.getState().creating).toBe(true));
+    pending.resolve(snapshot([{ id: "p1", name: "Alpha" }], "p1"));
+    await run;
+
     const state = store.getState();
-    expect(state.projects).toHaveLength(1);
-    expect(state.selectedProjectId).toBe(state.projects[0]?.id);
+    expect(state.creating).toBe(false);
+    expect(state.data.projects[0]?.name).toBe("Alpha");
+    expect(state.data.selectedProjectId).toBe("p1");
+    expect(state.actionError).toBeNull();
   });
 
-  it("rejects invalid names without changing state", () => {
-    const store = createWorkspaceStore();
-    store.createProject("Demo");
-    const before = store.getState();
+  it("keeps the last valid state and surfaces the error when a create fails", async () => {
+    const ipc = makeIpc({ load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "Kept" }])) });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
 
-    expect(store.createProject("")).toEqual({ ok: false, error: "empty" });
-    expect(store.createProject("Demo")).toEqual({ ok: false, error: "duplicate" });
-    expect(store.createProject("a".repeat(MAX_PROJECT_NAME_LENGTH + 1))).toEqual({
-      ok: false,
-      error: "too_long",
+    ipc.create.mockRejectedValue({ kind: "storage", message: "write failed" });
+    await store.create("Broken");
+
+    const state = store.getState();
+    expect(state.creating).toBe(false);
+    expect(state.actionError).toEqual({ kind: "storage", message: "write failed" });
+    expect(state.data.projects[0]?.name).toBe("Kept");
+  });
+
+  it("ignores a second create while one is in flight", async () => {
+    const pending = deferred<WorkspaceSnapshot>();
+    const ipc = makeIpc();
+    ipc.create.mockReturnValue(pending.promise);
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    const first = store.create("Alpha");
+    await store.create("Beta"); // must be ignored
+    pending.resolve(snapshot([{ id: "p1", name: "Alpha" }]));
+    await first;
+    expect(ipc.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("workspace store — select and delete", () => {
+  it("skips selecting the already-selected project without an IPC call", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "A" }], "p1")),
     });
-    expect(store.getState()).toEqual(before);
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    await store.select("p1");
+    expect(ipc.select).not.toHaveBeenCalled();
   });
 
-  it("supports multiple projects and switching selection", () => {
-    const store = createWorkspaceStore();
-    const a = store.createProject("A");
-    const b = store.createProject("B");
-    if (!a.ok || !b.ok) throw new Error("setup failed");
-    expect(store.getState().selectedProjectId).toBe(b.project.id);
-    store.selectProject(a.project.id);
-    expect(store.getState().selectedProjectId).toBe(a.project.id);
-    store.selectProject("nonexistent");
-    expect(store.getState().selectedProjectId).toBe(a.project.id);
+  it("keeps the previous selection when select fails", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "A" }], "p1")),
+    });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    ipc.select.mockRejectedValue({ kind: "invalid_input", message: "Unknown project." });
+    await store.select("ghost");
+    expect(store.getState().data.selectedProjectId).toBe("p1");
+    expect(store.getState().actionError?.message).toContain("Unknown project.");
   });
 
-  it("notifies subscribers on every state change and on unsubscribe stops", () => {
-    const store = createWorkspaceStore();
+  it("applies the snapshot after delete (backend clears the selection)", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(
+        snapshot(
+          [
+            { id: "p1", name: "A" },
+            { id: "p2", name: "B" },
+          ],
+          "p1",
+        ),
+      ),
+    });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    ipc.remove.mockResolvedValue(snapshot([{ id: "p2", name: "B" }]));
+    await store.remove("p1");
+    expect(store.getState().data.projects).toHaveLength(1);
+    expect(store.getState().data.selectedProjectId).toBeNull();
+  });
+
+  it("keeps the last valid state when delete fails", async () => {
+    const ipc = makeIpc({
+      load: vi.fn().mockResolvedValue(snapshot([{ id: "p1", name: "A" }], "p1")),
+    });
+    const store = createWorkspaceStore(ipc);
+    await store.load();
+
+    ipc.remove.mockRejectedValue({ kind: "storage", message: "write failed" });
+    await store.remove("p1");
+    expect(store.getState().data.projects).toHaveLength(1);
+    expect(store.getState().actionError?.kind).toBe("storage");
+  });
+});
+
+describe("workspace store — guards", () => {
+  it("ignores mutations while the store is not ready", async () => {
+    const pending = deferred<WorkspaceSnapshot>();
+    const ipc = makeIpc({ load: vi.fn().mockReturnValue(pending.promise) });
+    const store = createWorkspaceStore(ipc);
+
+    await store.create("X"); // ignored: still loading
+    await store.select("x");
+    await store.remove("x");
+    expect(ipc.create).not.toHaveBeenCalled();
+    expect(ipc.select).not.toHaveBeenCalled();
+    expect(ipc.remove).not.toHaveBeenCalled();
+    pending.resolve(snapshot([]));
+    await store.load();
+  });
+
+  it("notifies subscribers on every state change", async () => {
+    const ipc = makeIpc();
+    const store = createWorkspaceStore(ipc);
     const listener = vi.fn();
-    const unsubscribe = store.subscribe(listener);
-
-    store.createProject("A");
+    store.subscribe(listener);
+    await store.load();
     expect(listener).toHaveBeenCalled();
-    listener.mockClear();
-
-    unsubscribe();
-    store.createProject("B");
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it("deletes a project and clears selection when the selected one is removed", () => {
-    const store = createWorkspaceStore();
-    const a = store.createProject("A");
-    store.createProject("B");
-    if (!a.ok) throw new Error("setup failed");
-
-    store.deleteProject(a.project.id);
-    const state = store.getState();
-    expect(state.projects.map((p) => p.name)).toEqual(["B"]);
-    expect(state.selectedProjectId).not.toBeNull(); // selection moved off A only
-
-    store.selectProject(state.projects[0]!.id);
-    store.deleteProject(state.projects[0]!.id);
-    expect(store.getState()).toEqual({ projects: [], selectedProjectId: null });
-  });
-
-  it("ignores deletion of unknown ids", () => {
-    const store = createWorkspaceStore();
-    const before = store.getState();
-    store.deleteProject("nonexistent");
-    expect(store.getState()).toEqual(before);
   });
 });

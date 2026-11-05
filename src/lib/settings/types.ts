@@ -1,29 +1,29 @@
 /**
- * Settings domain model — in-memory only (Phase 1).
+ * Settings domain model — persisted by the Rust core (SQLite).
  *
- * These are user preferences, not operational configuration: Telegram
+ * These are saved preferences, not operational configuration: Telegram
  * notifications and autonomous execution are NOT functional yet (no
  * Telegram integration, no orchestration engine — see docs/ROADMAP.md).
- * Persistence arrives in Phase 2.
  */
+import type { CommandErrorPayload } from "../../types/app";
+import type { Settings, SettingsInput } from "../../types/workspace";
 
-/** How execution approvals behave once orchestration exists (Phase 6+). */
-export type ApprovalMode = "manual" | "autonomous";
+export type { Settings, SettingsInput };
 
-export interface SettingsState {
-  approvalMode: ApprovalMode;
-  /** Retry cap for failed micro-tasks, clamped to 1..MAX_RETRY_LIMIT. */
-  maxRetry: number;
-  telegramNotifications: boolean;
-}
-
-/** Bounds for the retry preference. */
+/** Allowed bounds for the retry preference. */
 export const MIN_RETRY = 1;
 export const MAX_RETRY_LIMIT = 10;
 
-/** Defaults per docs/GOVERNANCE.md §Execution controls. */
-export const DEFAULT_SETTINGS: SettingsState = {
-  approvalMode: "manual",
-  maxRetry: 3,
-  telegramNotifications: true,
-};
+/** Overall persistence phase. `error` means no valid settings exist yet. */
+export type SettingsPhase = "loading" | "ready" | "error";
+
+/** Full observable settings state. */
+export interface SettingsState {
+  phase: SettingsPhase;
+  data: Settings;
+  /** Load failure when no valid settings exist yet (drives the retry UI). */
+  loadError: CommandErrorPayload | null;
+  /** Failure of the latest update (shown near the controls). */
+  actionError: CommandErrorPayload | null;
+  saving: boolean;
+}

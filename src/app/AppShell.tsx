@@ -131,12 +131,14 @@ function AppShell({
 
   function handleProjectSelect(event: ChangeEvent<HTMLSelectElement>) {
     if (event.target.value) {
-      workspaceStore.selectProject(event.target.value);
+      void workspaceStore.select(event.target.value);
     }
   }
 
-  const selectedProject = workspace.projects.find(
-    (p) => p.id === workspace.selectedProjectId,
+  const workspaceReady = workspace.phase === "ready";
+  const projects = workspace.data.projects;
+  const selectedProject = projects.find(
+    (p) => p.id === workspace.data.selectedProjectId,
   );
 
   return (
@@ -176,25 +178,31 @@ function AppShell({
           <label className="project-select">
             <span>Project</span>
             <select
-              value={workspace.selectedProjectId ?? ""}
+              value={workspace.data.selectedProjectId ?? ""}
               onChange={handleProjectSelect}
-              disabled={workspace.projects.length === 0}
+              // Unavailable until the persisted workspace has loaded; busy
+              // while a selection change is in flight.
+              disabled={
+                !workspaceReady ||
+                workspace.selectingId !== null ||
+                projects.length === 0
+              }
             >
-              {workspace.projects.length === 0 ? (
+              {!workspaceReady && <option value="">Loading…</option>}
+              {workspaceReady && projects.length === 0 && (
                 <option value="">No projects yet</option>
-              ) : (
-                workspace.selectedProjectId === null && (
-                  <option value="">Select a project…</option>
-                )
               )}
-              {workspace.projects.map((project) => (
+              {workspaceReady &&
+                workspace.data.selectedProjectId === null &&
+                projects.length > 0 && <option value="">Select a project…</option>}
+              {projects.map((project) => (
                 <option key={project.id} value={project.id}>
                   {project.name}
                 </option>
               ))}
             </select>
           </label>
-          <span className="phase-badge">Phase 1 · Workspace</span>
+          <span className="phase-badge">Phase 2 · Persistence</span>
         </div>
       </header>
 
@@ -220,7 +228,7 @@ function AppShell({
         )}
         <SidebarNav activeView={activeView} onNavigate={handleNavigate} />
         <p className="sidebar-footnote">
-          In-memory session state — persistence arrives in Phase 2.
+          Projects and settings persist locally (SQLite, via the Rust core).
         </p>
       </aside>
       {overlayActive && (

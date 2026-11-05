@@ -1,35 +1,67 @@
 /**
- * Workspace domain model — in-memory only.
+ * Workspace domain model — persisted by the Rust core (SQLite).
  *
- * Nothing here persists across application restarts; persistence arrives
- * in Phase 2 (SQLite, see docs/ROADMAP.md). Types mirror what the UI
- * needs; no speculative fields.
+ * The store keeps the last valid snapshot from the backend and never
+ * falls back to in-memory-only operation: if persistence is unavailable,
+ * the state carries the error and the UI offers a retry.
  */
+import type { CommandErrorPayload } from "../../types/app";
+import type { Project, WorkspaceSnapshot } from "../../types/workspace";
 
-/** A user-created workspace project. */
-export interface Project {
-  /** Stable unique id. */
-  id: string;
-  /** Trimmed, validated display name. */
-  name: string;
-  /** ISO timestamp of creation (display only). */
-  createdAt: string;
-}
+export type { Project, WorkspaceSnapshot };
 
-/** Reasons a project name can be rejected. */
+/** Reasons a project name can be rejected by client-side validation. */
 export type ProjectNameError = "empty" | "too_long" | "duplicate";
 
 /** Maximum project name length, counted per the D-012 code-point policy. */
 export const MAX_PROJECT_NAME_LENGTH = 80;
 
-/** Full in-memory workspace state. */
-export interface WorkspaceState {
-  projects: readonly Project[];
-  /** Id of the currently selected project, or null when none is selected. */
+/** The last valid snapshot known from the backend. */
+export interface WorkspaceData {
+  projects: Project[];
   selectedProjectId: string | null;
 }
 
-/** Result of an attempted project creation. */
+/** Overall persistence phase. `error` means no valid snapshot exists yet. */
+export type WorkspacePhase = "loading" | "ready" | "error";
+
+/** Full observable workspace state. */
+export interface WorkspaceState {
+  phase: WorkspacePhase;
+  data: WorkspaceData;
+  /** Load failure when no valid snapshot exists yet (drives the retry UI). */
+  loadError: CommandErrorPayload | null;
+  /** Failure of the latest mutating action (shown near the controls). */
+  actionError: CommandErrorPayload | null;
+  /** In-flight guards — prevent duplicate requests and races. */
+  creating: boolean;
+  selectingId: string | null;
+  deletingId: string | null;
+}
+
+/** Result of client-side validation for a new project name. */
 export type CreateProjectResult =
-  | { ok: true; project: Project }
+  | { ok: true }
   | { ok: false; error: ProjectNameError };
+
+/**
+ * Client-side validation for instant feedback. The Rust core re-validates
+ * authoritatively (including duplicates at the database level).
+ */
+export function validateProjectName(
+  rawName: string,
+  existingProjects: readonly Project[],
+): ProjectNameError | null {
+  const name = rawName.trim();
+  const length = [...name].length;
+  if (length === 0) {
+    return "empty";
+  }
+  if (length > MAX_PROJECT_NAME_LENGTH) {
+    return "too_long";
+  }
+  if (existingProjects.some((p) => p.name === name)) {
+    return "duplicate";
+  }
+  return null;
+}

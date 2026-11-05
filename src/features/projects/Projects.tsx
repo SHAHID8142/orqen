@@ -4,15 +4,7 @@ import {
   useWorkspace,
   useWorkspaceStore,
 } from "../../lib/workspace/WorkspaceContext";
-import type { ProjectNameError } from "../../lib/workspace/types";
-import { MAX_PROJECT_NAME_LENGTH } from "../../lib/workspace/types";
 import "./Projects.css";
-
-const ERROR_TEXT: Record<ProjectNameError, string> = {
-  empty: "Project name must not be empty.",
-  too_long: `Project name must not exceed ${MAX_PROJECT_NAME_LENGTH} characters.`,
-  duplicate: "A project with this name already exists.",
-};
 
 /**
  * Where keyboard focus should land after the current interaction settles
@@ -24,14 +16,14 @@ type FocusTarget =
   | { kind: "name-input" };
 
 /**
- * Projects surface: in-memory creation, selection and deletion.
- * Session state only — nothing persists across restarts (Phase 2 scope).
+ * Projects surface: persistent creation, selection and deletion.
+ * All operations run through the Rust core (SQLite); the store applies
+ * the fresh backend snapshot after every mutation.
  */
 function Projects() {
   const workspace = useWorkspace();
   const store = useWorkspaceStore();
   const [nameInput, setNameInput] = useState("");
-  const [nameError, setNameError] = useState<ProjectNameError | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [pendingFocus, setPendingFocus] = useState<FocusTarget | null>(null);
@@ -52,39 +44,89 @@ function Projects() {
     setPendingFocus(null);
   }, [pendingFocus]);
 
-  const selectedProject = workspace.projects.find(
-    (p) => p.id === workspace.selectedProjectId,
+  const ready = workspace.phase === "ready";
+  const projects = workspace.data.projects;
+  const selectedProject = projects.find(
+    (p) => p.id === workspace.data.selectedProjectId,
   );
+  const busy = workspace.creating || workspace.selectingId !== null || workspace.deletingId !== null;
 
-  function handleCreate(event: FormEvent<HTMLFormElement>) {
+  async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = store.createProject(nameInput);
-    if (!result.ok) {
-      setNameError(result.error);
-      return;
+    if (!ready) return;
+    await store.create(nameInput);
+    // The store surfaces validation/backend errors via actionError; clear
+    // the input only when the name was accepted (project list changed).
+    const accepted = store.getState().actionError === null;
+    if (accepted) {
+      const createdName = nameInput.trim();
+      setNameInput("");
+      setAnnouncement(`Project "${createdName}" created and selected.`);
     }
-    setNameError(null);
-    setNameInput("");
-    setAnnouncement(`Project "${result.project.name}" created and selected.`);
   }
 
-  function handleCancelDelete(projectId: string) {
+  async function handleSelect(id: string) {
+    if (!ready) return;
+    await store.select(id);
+  }
+
+  async function handleCancelDelete(projectId: string) {
     setPendingDeleteId(null);
     setPendingFocus({ kind: "delete-button", projectId });
   }
 
-  function handleDeleteConfirmed() {
-    if (!pendingDeleteId) return;
-    const target = workspace.projects.find((p) => p.id === pendingDeleteId);
-    const remaining = workspace.projects.filter((p) => p.id !== pendingDeleteId);
-    store.deleteProject(pendingDeleteId);
+  async function handleDeleteConfirmed() {
+    if (!pendingDeleteId || !ready) return;
+    const target = projects.find((p) => p.id === pendingDeleteId);
+    await store.remove(pendingDeleteId);
     setPendingDeleteId(null);
-    setPendingFocus(
-      remaining[0]
-        ? { kind: "select-button", projectId: remaining[0].id }
-        : { kind: "name-input" },
+    if (store.getState().actionError === null) {
+      if (target) setAnnouncement(`Project "${target.name}" deleted.`);
+      // Focus a meaningful surviving element (state is already updated).
+      const surviving = store.getState().data.projects;
+      setPendingFocus(
+        surviving[0]
+          ? { kind: "select-button", projectId: surviving[0].id }
+          : { kind: "name-input" },
+      );
+    }
+  }
+
+  const actionError = workspace.actionError ?? workspace.loadError;
+  const nameError =
+    actionError?.kind === "invalid_input" ? actionError : null;
+
+  if (workspace.phase === "loading") {
+    return (
+      <section aria-labelledby="projects-heading" aria-busy="true" className="projects">
+        <h1 id="projects-heading" tabIndex={-1}>
+          Projects
+        </h1>
+        <p className="surface-lead" data-testid="projects-loading">
+          Loading projects…
+        </p>
+      </section>
     );
-    if (target) setAnnouncement(`Project "${target.name}" deleted.`);
+  }
+
+  if (workspace.phase === "error") {
+    return (
+      <section aria-labelledby="projects-heading" className="projects">
+        <h1 id="projects-heading" tabIndex={-1}>
+          Projects
+        </h1>
+        <div className="error-card" role="alert" data-testid="projects-error">
+          <h2>Could not load projects</h2>
+          <p>
+            {workspace.loadError?.message ??
+              "The local database is unavailable. Your data is untouched."}
+          </p>
+          <button type="button" onClick={() => void store.load()}>
+            Retry
+          </button>
+        </div>
+      </section>
+    );
   }
 
   return (
@@ -93,11 +135,17 @@ function Projects() {
         Projects
       </h1>
       <p className="surface-lead">
-        In-memory workspaces for the current session. Nothing is stored on
-        disk yet — persistence arrives in Phase 2.
+        Persisted locally via the Rust core — projects survive application
+        restarts.
       </p>
 
-      <form className="project-create" onSubmit={handleCreate} noValidate>
+      <form
+        className="project-create"
+        onSubmit={(event) => {
+          void handleCreate(event);
+        }}
+        noValidate
+      >
         <label htmlFor="project-name">New project name</label>
         <div className="project-create-row">
           <input
@@ -107,18 +155,25 @@ function Projects() {
             value={nameInput}
             onChange={(event) => {
               setNameInput(event.target.value);
-              setNameError(null);
             }}
             aria-invalid={nameError ? true : undefined}
             aria-describedby={nameError ? "project-name-error" : undefined}
             placeholder="e.g. My App"
             autoComplete="off"
+            disabled={busy}
           />
-          <button type="submit">Create project</button>
+          <button type="submit" disabled={busy || workspace.creating}>
+            {workspace.creating ? "Creating…" : "Create project"}
+          </button>
         </div>
-        {nameError && (
-          <p id="project-name-error" className="field-error" role="alert">
-            {ERROR_TEXT[nameError]}
+        {actionError && (
+          <p
+            id="project-name-error"
+            className="field-error"
+            role="alert"
+            data-testid="projects-action-error"
+          >
+            {actionError.message}
           </p>
         )}
       </form>
@@ -127,25 +182,36 @@ function Projects() {
         {announcement}
       </p>
 
-      {workspace.projects.length === 0 ? (
+      {projects.length === 0 ? (
         <div className="empty-state" data-testid="projects-empty">
           <h2>No projects yet</h2>
           <p>Create your first project above to start organizing work.</p>
         </div>
       ) : (
         <ul className="project-list" aria-label="Projects">
-          {workspace.projects.map((project) => {
-            const isSelected = project.id === workspace.selectedProjectId;
+          {projects.map((project) => {
+            const isSelected = project.id === workspace.data.selectedProjectId;
             return (
               <li
                 key={project.id}
                 className={`project-item${isSelected ? " selected" : ""}`}
               >
                 {pendingDeleteId === project.id ? (
-                  <div className="delete-confirm" role="group" aria-label={`Confirm deleting ${project.name}`}>
+                  <div
+                    className="delete-confirm"
+                    role="group"
+                    aria-label={`Confirm deleting ${project.name}`}
+                  >
                     <span>Delete “{project.name}”? This cannot be undone.</span>
                     <div className="delete-confirm-actions">
-                      <button type="button" className="danger" onClick={handleDeleteConfirmed}>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={workspace.deletingId !== null}
+                        onClick={() => {
+                          void handleDeleteConfirmed();
+                        }}
+                      >
                         Delete
                       </button>
                       {/* Focus lands here when the confirmation appears:
@@ -153,7 +219,10 @@ function Projects() {
                       <button
                         type="button"
                         autoFocus
-                        onClick={() => handleCancelDelete(project.id)}
+                        disabled={workspace.deletingId !== null}
+                        onClick={() => {
+                          void handleCancelDelete(project.id);
+                        }}
                       >
                         Cancel
                       </button>
@@ -170,11 +239,16 @@ function Projects() {
                         if (el) selectButtonRefs.current.set(project.id, el);
                         else selectButtonRefs.current.delete(project.id);
                       }}
-                      onClick={() => store.selectProject(project.id)}
+                      disabled={busy}
+                      onClick={() => {
+                        void handleSelect(project.id);
+                      }}
                     >
                       <span className="project-name">{project.name}</span>
                       <span className="project-meta">
-                        {isSelected ? "Selected" : "Created " + project.createdAt.slice(0, 10)}
+                        {isSelected
+                          ? "Selected"
+                          : "Created " + project.createdAt.slice(0, 10)}
                       </span>
                     </button>
                     <button
@@ -185,6 +259,7 @@ function Projects() {
                         if (el) deleteButtonRefs.current.set(project.id, el);
                         else deleteButtonRefs.current.delete(project.id);
                       }}
+                      disabled={busy}
                       onClick={() => setPendingDeleteId(project.id)}
                     >
                       Delete

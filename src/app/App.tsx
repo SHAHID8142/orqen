@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createAppSettingsStore, SettingsProvider } from "../lib/settings/SettingsContext";
 import type { SettingsStore } from "../lib/settings/store";
 import { createAppWorkspaceStore, WorkspaceProvider } from "../lib/workspace/WorkspaceContext";
@@ -15,8 +15,9 @@ import type { ViewId } from "./views";
  * Application root.
  *
  * Holds the active navigation view (state-based switching, D-013) and the
- * two in-memory stores. Session state only — nothing persists across
- * restarts until Phase 2. Stores are injectable for tests.
+ * two persistence-backed stores. On mount it loads the persisted state
+ * from the Rust core; failures surface in the UI with retry controls.
+ * Stores are injectable for tests.
  */
 
 const defaultWorkspaceStore = createAppWorkspaceStore();
@@ -30,6 +31,11 @@ function App({
   settings?: SettingsStore;
 } = {}) {
   const [activeView, setActiveView] = useState<ViewId>("overview");
+
+  useEffect(() => {
+    void workspace.load();
+    void settings.load();
+  }, [workspace, settings]);
 
   return (
     <WorkspaceProvider store={workspace}>

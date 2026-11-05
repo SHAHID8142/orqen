@@ -21,6 +21,25 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 2 · Feature 001 verification (2026-11-05, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` (lint → typecheck → test → build) | PASS — exit 0; **80/80 tests**, 7 files |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust unit tests | `cargo test` | PASS — **33/33** (db init ×4, migrations ×7, workspace commands ×5, settings ×5, plus Phase 0 IPC/Unicode ×12) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS (process level) — no crash, 0 error lines, Vite HTTP 200 |
+| 7 | **Real database creation** | app launch + `sqlite3` inspection | PASS — `~/Library/Application Support/io.github.shahid8142.orqen/orqen.sqlite3` created with `-wal`/`-shm` (WAL active); `PRAGMA user_version` = 1; tables `projects` + `settings`; settings defaults row (`manual`, 3, on) |
+| 8 | **Restart persistence probe** | external row seeded between two real launches | PASS — probe project + selection + changed setting survived the relaunch **and were not wiped** by the app (0 error lines); probe cleaned up afterwards |
+| 9 | Secret/DB tracking scan | `git status` / `git ls-files` | PASS — no database files or secrets tracked; DB lives outside the repository |
+| 10 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+Rust test coverage added for Phase 2: database initialization and configuration (WAL, foreign keys); migration application, idempotent re-run, and **failure rollback** (version + schema unchanged); corrupted-database open failure **without deletion**; project CRUD through the connection-level helpers; duplicate-name rejection (unique index + friendly error); unknown-id rejection; selected-project cleared via foreign key on delete; snapshot survival across reopen; settings defaults/updates/restore/invalid-value rejection; `DbState` retry path when initialization failed.
+
+Frontend test coverage added for Phase 2: store loading/ready/error phases with retry; failed reloads keeping the last valid state; snapshot convergence after every mutation; duplicate-request guards (load/create/update in flight); failed writes preserving previous data; client-side validation without backend calls; component-level loading/error cards with retry; header selector disabled while loading or empty; deletion confirmation with focus management preserved; settings updates, clamped retry editing, backend failures keeping previous values; truthfulness labels unchanged.
+
 ## Phase 1 · Feature 001 accessibility fix verification (2026-11-05, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

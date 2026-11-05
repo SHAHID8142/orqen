@@ -13,9 +13,10 @@ import {
   vi,
 } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
 import { createWorkspaceStore } from "../lib/workspace/store";
+import type { WorkspaceSnapshot } from "../types/workspace";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -25,6 +26,72 @@ import { invoke } from "@tauri-apps/api/core";
 
 const invokeMock = vi.mocked(invoke);
 
+/** Minimal backend simulation so the app runs end-to-end in tests. */
+function installBackendSimulation(options: {
+  loadWorkspace?: () => Promise<WorkspaceSnapshot>;
+} = {}) {
+  const projects: Array<{ id: string; name: string; createdAt: string }> = [];
+  let selectedProjectId: string | null = null;
+  const settings = {
+    approvalMode: "manual" as "manual" | "autonomous",
+    maxRetry: 3,
+    telegramNotifications: true,
+  };
+  const snap = (): WorkspaceSnapshot => ({
+    projects: projects.map((p) => ({ ...p })),
+    selectedProjectId,
+  });
+
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    const payload = (args ?? {}) as Record<string, unknown>;
+    switch (command) {
+      case "get_app_info":
+        return { name: "Orqen", version: "0.1.0", os: "macos" };
+      case "echo_ping":
+        return "ping";
+      case "load_workspace":
+        return options.loadWorkspace ? options.loadWorkspace() : snap();
+      case "create_project": {
+        const project = {
+          id: crypto.randomUUID(),
+          name: String(payload.name).trim(),
+          createdAt: "2026-01-01T00:00:00Z",
+        };
+        projects.push(project);
+        selectedProjectId = project.id;
+        return snap();
+      }
+      case "select_project": {
+        const id = String(payload.id);
+        if (!projects.some((p) => p.id === id)) {
+          throw { kind: "invalid_input", message: "Unknown project." };
+        }
+        selectedProjectId = id;
+        return snap();
+      }
+      case "delete_project": {
+        const id = String(payload.id);
+        if (!projects.some((p) => p.id === id)) {
+          throw { kind: "invalid_input", message: "Unknown project." };
+        }
+        const index = projects.findIndex((p) => p.id === id);
+        projects.splice(index, 1);
+        if (selectedProjectId === id) selectedProjectId = null;
+        return snap();
+      }
+      case "load_settings":
+        return { ...settings };
+      case "update_settings": {
+        const input = payload.settings as typeof settings;
+        Object.assign(settings, input);
+        return { ...settings };
+      }
+      default:
+        throw new Error(`unexpected command: ${command}`);
+    }
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -33,19 +100,21 @@ afterEach(() => {
 describe("App shell navigation", () => {
   beforeEach(() => {
     invokeMock.mockReset();
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "get_app_info") {
-        return { name: "Orqen", version: "0.1.0", os: "macos" };
-      }
-      if (command === "echo_ping") {
-        return "ping";
-      }
-      throw new Error(`unexpected command: ${command}`);
-    });
+    installBackendSimulation();
   });
 
   function renderApp() {
-    return render(<App workspace={createWorkspaceStore()} />);
+    return render(
+      <App
+        workspace={createWorkspaceStore({
+          load: () => invokeMock("load_workspace") as Promise<WorkspaceSnapshot>,
+          create: (name) =>
+            invokeMock("create_project", { name }) as Promise<WorkspaceSnapshot>,
+          select: (id) => invokeMock("select_project", { id }) as Promise<WorkspaceSnapshot>,
+          remove: (id) => invokeMock("delete_project", { id }) as Promise<WorkspaceSnapshot>,
+        })}
+      />,
+    );
   }
 
   /** Renders the app with matchMedia stubbed to the narrow breakpoint. */
@@ -149,12 +218,13 @@ describe("App shell navigation", () => {
     expect(skipLink).toHaveAttribute("href", "#main-content");
   });
 
-  it("reflects the selected project in the header", () => {
+  it("reflects the selected project in the header", async () => {
     renderApp();
 
     const selector = screen.getByRole("combobox", { name: "Project" });
+    await waitFor(() => expect(selector).toHaveTextContent("No projects yet"));
+    // An empty workspace keeps the selector disabled until a project exists.
     expect(selector).toBeDisabled();
-    expect(selector).toHaveTextContent("No projects yet");
 
     // Create a project via the Projects surface and check the header updates.
     fireEvent.click(screen.getByRole("button", { name: "Projects" }));
@@ -163,8 +233,58 @@ describe("App shell navigation", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
-    expect(screen.getByTestId("header-project")).toHaveTextContent("Header Demo");
+    await waitFor(() => {
+      expect(screen.getByTestId("header-project")).toHaveTextContent("Header Demo");
+    });
     expect(screen.getByRole("combobox", { name: "Project" })).toBeEnabled();
+  });
+
+  it("disables the project selector while the workspace is loading", async () => {
+    let resolveLoad!: (value: WorkspaceSnapshot) => void;
+    installBackendSimulation({
+      loadWorkspace: () =>
+        new Promise<WorkspaceSnapshot>((resolve) => {
+          resolveLoad = resolve;
+        }),
+    });
+    renderApp();
+
+    const selector = screen.getByRole("combobox", { name: "Project" });
+    expect(selector).toBeDisabled();
+    expect(selector).toHaveTextContent("Loading…");
+
+    resolveLoad({
+      projects: [{ id: "p1", name: "Ready", createdAt: "2026-01-01T00:00:00Z" }],
+      selectedProjectId: "p1",
+    });
+    await waitFor(() => expect(selector).toBeEnabled());
+    expect(selector).toHaveTextContent("Ready");
+  });
+
+  it("offers a retry control when the workspace cannot load", async () => {
+    invokeMock.mockReset();
+    let fail = true;
+    installBackendSimulation({
+      loadWorkspace: () =>
+        fail
+          ? Promise.reject({ kind: "storage", message: "database unavailable" })
+          : Promise.resolve({ projects: [], selectedProjectId: null }),
+    });
+    renderApp();
+
+    fireEvent.click(screen.getByRole("button", { name: "Projects" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-error")).toHaveTextContent(
+        "Could not load projects",
+      );
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("database unavailable");
+
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+    });
   });
 
   it("toggles the sidebar with aria-expanded state", () => {

@@ -6,12 +6,12 @@ Single source of truth for "where is the project right now". Updated at every me
 
 | Field | Value |
 | --- | --- |
-| **Phase** | 1 — Workspace Shell & Navigation |
-| **Feature** | 001 — Workspace Shell & Navigation (accessibility fix complete) |
-| **Progress** | Final accessibility fix delivered: modal drawer with complete focus containment (`inert` everywhere outside + explicit boundary wrap), verified by 70 automated tests **and** a real-browser keyboard matrix. All local gates pass. **CI = BLOCKED — EXTERNAL** (unchanged) |
+| **Phase** | 2 — Local Persistence (SQLite) & Settings |
+| **Feature** | 001 — SQLite Persistence & Settings Integration |
+| **Progress** | Feature implemented end-to-end: SQLite (rusqlite/WAL) owned by Rust, transactional migrations (v1), projects + selection + settings persisted and restored across restarts, frontend stores converged on backend snapshots with loading/error/retry states. **80 frontend + 33 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
 | **Blockers** | **CI blocked externally** (see [QA_REPORT.md](QA_REPORT.md) CI verification) — external to the repository; rerun path documented there. |
-| **Next review checkpoint** | Manual review of the accessibility fix (incl. the manual keyboard checklist in the final report) |
-| **Next feature (after approval)** | Per [ROADMAP.md](ROADMAP.md): Phase 2 — Local Persistence (SQLite) & Settings |
+| **Next review checkpoint** | Manual review of Phase 2 Feature 001 (incl. the manual restart checklist in the final report) |
+| **Next feature (after approval)** | Phase 3 — Agent Registry & Adapters ([ROADMAP.md](ROADMAP.md)) |
 
 ## Phase 1 · Feature 001 progress detail
 
@@ -28,12 +28,27 @@ Single source of truth for "where is the project right now". Updated at every me
 | Quality gates + launch | Done — see QA_REPORT.md Phase 1 section |
 | Documentation | Done — D-013; ARCHITECTURE/ROADMAP/README/QA_REPORT updated |
 
+## Phase 2 · Feature 001 progress detail
+
+| Micro-task | Status |
+| --- | --- |
+| A — Database foundation (location, connection strategy, failure policy) | Done — 4 Rust tests (incl. corruption never deleted) |
+| B — Schema & transactional migrations (v1) | Done — 7 Rust tests (idempotence, rollback, constraints, FK) |
+| C — Persistent project operations | Done — 5 Rust command-level tests (CRUD, duplicates, unknown ids, reopen survival) |
+| D — Settings persistence | Done — 5 Rust tests (defaults, updates, restore, invalid rejected, reopen survival) |
+| E — React state integration (loading/ready/error, retry, pending guards, snapshot convergence) | Done — 24 store tests |
+| F — Error handling & data safety | Done (storage error kind, recovery guidance, no auto-reset; verified in tests) |
+| G — Automated testing | Done — 33 Rust + 80 frontend tests |
+| H — Restart verification | DB level verified (real-launch probe); interactive GUI restart → manual checklist |
+
 ## Open items carried forward
 
 1. **Windows verification** — CI runs Rust checks on Linux and frontend gates on Linux; Windows packaging is not machine-verified in CI yet (planned Phase 11, [ROADMAP.md](ROADMAP.md)).
 2. **ESLint 10 dev-only advisories** — accepted consciously (D-009), reassess next phase.
 3. **Style CSP hardening** — `'unsafe-inline'` retained for styles (D-005); revisit in hardening.
 4. **Visual confirmation of focus indicators** — the overlay interaction model is verified by automated tests and a real-browser keyboard matrix (QA_REPORT accessibility-fix section); final on-screen confirmation of focus ring appearance by the user remains part of manual review.
+5. **Interactive restart verification** — persistence verified by automated reopen tests and a real-launch DB probe; the visual restart walkthrough (create → relaunch → see data) awaits the user's manual pass (checklist in the Phase 2 final report).
+6. **Credentials at rest** — no secrets are stored today; when agent credentials arrive (Phase 3+), they go to the OS keychain, never plaintext SQLite ([ARCHITECTURE.md §Persistence](ARCHITECTURE.md)).
 
 ## Recent history
 
@@ -43,3 +58,4 @@ Single source of truth for "where is the project right now". Updated at every me
 - **2026-11-05** — Phase 1 · Feature 001 delivered: workspace shell with five navigation surfaces, in-memory project management (validation, selection, confirmed deletion), in-memory settings with truthful preference labeling, accessibility baseline (skip link, focus management, aria states, inert overlay background). D-013 recorded.
 - **2026-11-05** — Feature 001 review remediation: overlay sidebar focus management (always-mounted `hidden` sidebar with valid `aria-controls`, focus into sidebar on open, focus restored to toggle on Escape/backdrop/toggle), project delete-confirmation focus flow (Cancel focused on appear, Delete restored on cancel, surviving project or name input after delete), retry preference draft editing (free typing, commit on blur/Enter, Escape reverts, clamp on commit). 62 frontend tests passing; L-012/L-013 lessons recorded.
 - **2026-11-05** — Feature 001 final accessibility fix: narrow overlay is now a fully contained modal drawer (skip link + header + main `inert` while open, `role="dialog"`/`aria-modal`, in-drawer close button, effect-based focus restoration to the toggle). Real-browser keyboard verification found and fixed a Chromium wrap-around defect across `inert` regions (explicit boundary wrap added, overlay mode only). 70 frontend tests passing; L-014 recorded.
+- **2026-11-05** — Phase 2 · Feature 001 delivered: SQLite persistence via rusqlite (WAL, foreign keys, busy timeout), transactional migrations (v1), projects + selection + settings persisted across restarts, snapshot-convergent frontend stores with loading/error/retry states. D-014 recorded; 80 frontend + 33 Rust tests; real-launch restart probe verified (data preserved, no wipe).

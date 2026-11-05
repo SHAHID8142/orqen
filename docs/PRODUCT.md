@@ -1,6 +1,6 @@
 # PRODUCT.md — Product Vision & Functional Requirements
 
-Status legend used throughout: **[P0 IMPLEMENTED]** = shipped and verified in Phase 0. **[PLANNED]** = documented intent, not implemented. Nothing may be presented in the UI as functional while marked [PLANNED].
+Status legend used throughout: **[P0 IMPLEMENTED]** = shipped and verified in Phase 0. **[P2 IMPLEMENTED]** = shipped and verified in Phase 2. **[PLANNED]** = documented intent, not implemented. Nothing may be presented in the UI as functional while marked [PLANNED].
 
 ## 1. Vision
 
@@ -63,9 +63,11 @@ Design principles:
 ### 3.10 Remote communication [PLANNED]
 - Telegram bot for notifications and approval round-trips; default ON for notifications, OFF for command execution unless enabled (see [GOVERNANCE.md §Execution controls](GOVERNANCE.md)).
 
-### 3.11 Settings & configuration [PLANNED]
+### 3.11 Settings & configuration [P2 IMPLEMENTED — local persistence]
 - Local settings (approval mode, retry limits, notification channels, agent credentials).
 - Defaults ship safe: MANUAL approval, retry cap 3.
+- **Implemented (Phase 2):** approval mode, maximum retry, and Telegram notification preference persist in SQLite and survive restarts; "Restore defaults" updates persistent storage. These remain saved preferences — autonomous execution and Telegram delivery are not operational.
+- Agent credentials (Phase 3+) will use the OS keychain, never plaintext SQLite.
 
 ## 4. Non-goals
 
