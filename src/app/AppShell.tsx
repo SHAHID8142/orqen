@@ -8,8 +8,12 @@ import { NARROW_WIDTH_QUERY, type ViewId } from "./views";
  * Application shell: header, collapsible sidebar navigation, main content.
  *
  * Accessibility: skip link, labeled controls, focus moves to the active
- * view's heading on navigation, Escape closes the overlay sidebar on
- * narrow widths.
+ * view's heading on navigation. On narrow widths the sidebar is an
+ * overlay: opening moves focus to the first nav item, background content
+ * becomes `inert`, and every close path (Escape, backdrop, toggle)
+ * restores focus to the toggle. The sidebar stays mounted with `hidden`
+ * so `aria-controls` always points at a real element — no focus traps,
+ * no hidden tab stops.
  */
 function AppShell({
   activeView,
@@ -29,6 +33,7 @@ function AppShell({
     () => !window.matchMedia(NARROW_WIDTH_QUERY).matches,
   );
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLElement>(null);
 
   // Track the narrow-width breakpoint so the sidebar can switch between
@@ -43,6 +48,11 @@ function AppShell({
     return () => query.removeEventListener("change", onChange);
   }, []);
 
+  const closeOverlayAndRestoreFocus = () => {
+    setSidebarOpen(false);
+    toggleRef.current?.focus();
+  };
+
   // Escape closes the overlay sidebar and returns focus to the toggle.
   useEffect(() => {
     if (!sidebarOpen || !isNarrow) return;
@@ -54,6 +64,12 @@ function AppShell({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sidebarOpen, isNarrow]);
+
+  // Opening the narrow overlay moves focus into it (first nav item).
+  useEffect(() => {
+    if (!sidebarOpen || !isNarrow) return;
+    sidebarRef.current?.querySelector<HTMLElement>(".nav-item")?.focus();
   }, [sidebarOpen, isNarrow]);
 
   // Focus the active view's heading after navigation (skip link target
@@ -137,18 +153,21 @@ function AppShell({
         </div>
       </header>
 
-      {sidebarOpen && (
-        <aside id="workspace-sidebar" className={`app-sidebar${isNarrow ? " overlay" : ""}`}>
-          <SidebarNav activeView={activeView} onNavigate={handleNavigate} />
-          <p className="sidebar-footnote">
-            In-memory session state — persistence arrives in Phase 2.
-          </p>
-        </aside>
-      )}
+      <aside
+        id="workspace-sidebar"
+        ref={sidebarRef}
+        className={`app-sidebar${isNarrow ? " overlay" : ""}`}
+        hidden={!sidebarOpen}
+      >
+        <SidebarNav activeView={activeView} onNavigate={handleNavigate} />
+        <p className="sidebar-footnote">
+          In-memory session state — persistence arrives in Phase 2.
+        </p>
+      </aside>
       {isNarrow && sidebarOpen && (
         <div
           className="sidebar-backdrop"
-          onClick={() => setSidebarOpen(false)}
+          onClick={closeOverlayAndRestoreFocus}
           aria-hidden="true"
         />
       )}

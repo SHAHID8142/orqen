@@ -46,23 +46,52 @@ describe("Settings surface", () => {
     );
   });
 
-  it("clamps out-of-range retry values", () => {
+  it("lets the user type freely and commits the clamped value on blur", () => {
+    renderSettings();
+    const retryInput = screen.getByLabelText(/Maximum retry/);
+
+    // Intermediate typing is shown as typed — never snapped back mid-edit.
+    fireEvent.change(retryInput, { target: { value: "1" } });
+    expect(retryInput).toHaveValue(1);
+    fireEvent.change(retryInput, { target: { value: "12" } });
+    expect(retryInput).toHaveValue(12);
+
+    fireEvent.blur(retryInput);
+    expect(screen.getByTestId("settings-state")).toHaveTextContent(
+      "maximum retry: 10",
+    );
+    expect(retryInput).toHaveValue(10);
+  });
+
+  it("can clear the field; an empty draft reverts instead of committing", () => {
+    renderSettings();
+    const retryInput = screen.getByLabelText(/Maximum retry/);
+
+    fireEvent.change(retryInput, { target: { value: "" } });
+    expect(retryInput).toHaveValue(null); // stays cleared while editing
+
+    fireEvent.blur(retryInput);
+    expect(screen.getByTestId("settings-state")).toHaveTextContent(
+      "maximum retry: 3",
+    );
+    expect(retryInput).toHaveValue(3);
+  });
+
+  it("commits on Enter and reverts the draft on Escape", () => {
     renderSettings();
     const retryInput = screen.getByLabelText(/Maximum retry/);
 
     fireEvent.change(retryInput, { target: { value: "0" } });
+    fireEvent.keyDown(retryInput, { key: "Enter" });
     expect(screen.getByTestId("settings-state")).toHaveTextContent(
       "maximum retry: 1",
     );
 
-    fireEvent.change(retryInput, { target: { value: "999" } });
+    fireEvent.change(retryInput, { target: { value: "9" } });
+    fireEvent.keyDown(retryInput, { key: "Escape" });
+    fireEvent.blur(retryInput);
     expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "maximum retry: 10",
-    );
-
-    fireEvent.change(retryInput, { target: { value: "5" } });
-    expect(screen.getByTestId("settings-state")).toHaveTextContent(
-      "maximum retry: 5",
+      "maximum retry: 1",
     );
   });
 

@@ -69,3 +69,15 @@ Only entries with a validated root cause and an applied correction belong here. 
 **Root cause:** relying on textContent concatenation for the accessible name of a button composed of multiple inline/flex spans.
 **Correction:** project select buttons now set an explicit `aria-label={project.name}`; tests query by that exact name and assert selection state via `aria-pressed`.
 **Prevention rule:** interactive controls with composite visible content get explicit accessible names; do not let test queries depend on incidental text-join behavior.
+
+## L-012 | 2026-11-05 | Author `display` rules override the HTML `hidden` attribute
+**What failed:** during the overlay-sidebar remediation, the sidebar was switched to an always-mounted element with the `hidden` attribute — but the existing `.app-sidebar { display: flex }` rule would have overridden the user-agent `[hidden] { display: none }` stylesheet, silently rendering the "hidden" sidebar.
+**Root cause:** the `hidden` attribute only maps to a UA-stylesheet rule, which loses to any author `display` declaration of equal or higher specificity.
+**Correction:** added the guard rule `.app-sidebar[hidden] { display: none; }` in `global.css`.
+**Prevention rule:** when an always-mounted element is toggled with `hidden`, any author CSS that sets `display` on it must include a matching `[hidden]` display-none guard; self-audit CSS/attribute interactions before relying on UA defaults.
+
+## L-013 | 2026-11-05 | Negative DOM assertions need `queryBy*`, not `getBy*`
+**What failed:** a focus-restoration regression test asserted `expect(getByRole("group", …)).not.toBeInTheDocument()`; `getByRole` throws when the element is absent, so the test failed before its assertion could evaluate.
+**Root cause:** `getBy*` queries are "must exist" queries; using one for a not-expected-to-exist assertion inverts their contract.
+**Correction:** switched the negative assertion to `queryByRole(...)`.
+**Prevention rule:** absence assertions always use `queryBy*` (or `findBy*` negated with waitFor); reserve `getBy*` for elements that must exist at assertion time.

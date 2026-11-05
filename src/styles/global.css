@@ -211,6 +211,12 @@ body {
   gap: 12px;
 }
 
+/* Author display rules would override the UA `hidden` style — guard it,
+   so a hidden sidebar is truly removed from layout and the a11y tree. */
+.app-sidebar[hidden] {
+  display: none;
+}
+
 .sidebar-nav ul {
   list-style: none;
   margin: 0;

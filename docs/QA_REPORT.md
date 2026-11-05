@@ -21,6 +21,24 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 1 · Feature 001 review remediation verification (2026-11-05, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` (lint → typecheck → test → build) | PASS — exit 0; **62/62 tests**, 7 files (was 52; +10 regression tests, −1 replaced) |
+| 3 | Rust format / lints / compile | `npm run rust:fmt`, `rust:clippy`, `rust:check` | PASS — exit 0 all three |
+| 4 | Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | PASS — 10/10 |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS (process level) — ran through the observation window without crashing, 0 error lines, Vite HTTP 200 |
+| 7 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+Remediation regression tests added:
+
+- **Sidebar overlay a11y (4)**: `aria-controls` target remains in the document while hidden; focus moves to the first nav item on narrow-overlay open; backdrop click closes and restores focus to the toggle; `inert` present on main only while the narrow overlay is open. (Escape-close + focus restore was already covered.)
+- **Projects delete focus (4)**: confirmation appearing moves focus to Cancel; Cancel restores focus to the item's Delete button; confirmed deletion focuses the first surviving project's button; deleting the last project focuses the name input.
+- **Settings retry editing (2, replacing 1 immediate-commit test)**: free typing without mid-edit clamping, blur commits clamped value (12→10); clearing the field is allowed and an empty draft reverts instead of committing; Enter commits, Escape reverts the draft.
+
 ## Phase 1 · Feature 001 verification (2026-11-05, local, macOS 27.2 arm64)
 
 All results are observed outcomes with unpiped exit codes.

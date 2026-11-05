@@ -137,4 +137,77 @@ describe("Projects surface", () => {
     expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(/deleted/);
   });
+
+  it("moves focus to Cancel when the delete confirmation appears", () => {
+    renderProjects();
+    fireEvent.change(screen.getByLabelText("New project name"), {
+      target: { value: "Doomed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project Doomed" }));
+
+    expect(document.activeElement).toHaveTextContent("Cancel");
+  });
+
+  it("restores focus to the item's Delete button when cancellation is chosen", () => {
+    renderProjects();
+    fireEvent.change(screen.getByLabelText("New project name"), {
+      target: { value: "Doomed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete project Doomed" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(
+      screen.queryByRole("group", { name: "Confirm deleting Doomed" }),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Delete project Doomed" }),
+    );
+  });
+
+  it("focuses the first surviving project after a confirmed deletion", () => {
+    renderProjects();
+    fireEvent.change(screen.getByLabelText("New project name"), {
+      target: { value: "A" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    fireEvent.change(screen.getByLabelText("New project name"), {
+      target: { value: "B" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete project A" }));
+    fireEvent.click(
+      within(
+        screen.getByRole("group", { name: "Confirm deleting A" }),
+      ).getByRole("button", { name: "Delete" }),
+    );
+
+    expect(screen.queryByRole("button", { name: "A" })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "B" }),
+    );
+  });
+
+  it("focuses the name input when the last project is deleted", () => {
+    renderProjects();
+    fireEvent.change(screen.getByLabelText("New project name"), {
+      target: { value: "Only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete project Only" }));
+    fireEvent.click(
+      within(
+        screen.getByRole("group", { name: "Confirm deleting Only" }),
+      ).getByRole("button", { name: "Delete" }),
+    );
+
+    expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByLabelText("New project name"),
+    );
+  });
 });

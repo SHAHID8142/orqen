@@ -47,6 +47,16 @@ describe("App shell navigation", () => {
     return render(<App workspace={createWorkspaceStore()} />);
   }
 
+  /** Renders the app with matchMedia stubbed to the narrow breakpoint. */
+  function renderWithNarrowWindow() {
+    vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: true,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as MediaQueryList);
+    return renderApp();
+  }
+
   it("renders all five navigation surfaces and starts on Overview", () => {
     renderApp();
 
@@ -184,5 +194,50 @@ describe("App shell navigation", () => {
       screen.queryByRole("navigation", { name: "Workspace sections" }),
     ).not.toBeInTheDocument();
     expect(document.activeElement).toBe(toggle);
+  });
+
+  it("keeps the aria-controls target in the document while the sidebar is hidden", () => {
+    renderApp();
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // close
+    const sidebar = document.getElementById("workspace-sidebar");
+    expect(sidebar).not.toBeNull();
+    expect(sidebar).toHaveAttribute("hidden");
+  });
+
+  it("moves focus to the first nav item when the narrow overlay opens", () => {
+    renderWithNarrowWindow();
+
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i }));
+
+    expect(document.activeElement).toHaveTextContent("Overview");
+    expect(document.activeElement).toHaveAttribute("aria-current", "page");
+  });
+
+  it("restores focus to the toggle when the narrow backdrop is clicked", () => {
+    const { container } = renderWithNarrowWindow();
+
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // open
+    expect(container.querySelector(".sidebar-backdrop")).toBeInTheDocument();
+
+    fireEvent.click(container.querySelector(".sidebar-backdrop")!);
+    expect(
+      screen.queryByRole("navigation", { name: "Workspace sections" }),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /navigation/i }),
+    );
+  });
+
+  it("keeps background content inert only while the narrow overlay is open", () => {
+    const { container } = renderWithNarrowWindow();
+    const main = container.querySelector("main")!;
+
+    expect(main).not.toHaveAttribute("inert");
+
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // open
+    expect(main).toHaveAttribute("inert");
+
+    fireEvent.click(screen.getByRole("button", { name: /navigation/i })); // close
+    expect(main).not.toHaveAttribute("inert");
   });
 });

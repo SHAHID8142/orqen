@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   useWorkspace,
@@ -15,6 +15,15 @@ const ERROR_TEXT: Record<ProjectNameError, string> = {
 };
 
 /**
+ * Where keyboard focus should land after the current interaction settles
+ * (delete confirmation flows remount rows, so focus is restored by effect).
+ */
+type FocusTarget =
+  | { kind: "delete-button"; projectId: string }
+  | { kind: "select-button"; projectId: string }
+  | { kind: "name-input" };
+
+/**
  * Projects surface: in-memory creation, selection and deletion.
  * Session state only — nothing persists across restarts (Phase 2 scope).
  */
@@ -25,6 +34,23 @@ function Projects() {
   const [nameError, setNameError] = useState<ProjectNameError | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [pendingFocus, setPendingFocus] = useState<FocusTarget | null>(null);
+
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const selectButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const deleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const target =
+      pendingFocus.kind === "name-input"
+        ? nameInputRef.current
+        : pendingFocus.kind === "select-button"
+          ? (selectButtonRefs.current.get(pendingFocus.projectId) ?? null)
+          : (deleteButtonRefs.current.get(pendingFocus.projectId) ?? null);
+    target?.focus();
+    setPendingFocus(null);
+  }, [pendingFocus]);
 
   const selectedProject = workspace.projects.find(
     (p) => p.id === workspace.selectedProjectId,
@@ -42,11 +68,22 @@ function Projects() {
     setAnnouncement(`Project "${result.project.name}" created and selected.`);
   }
 
+  function handleCancelDelete(projectId: string) {
+    setPendingDeleteId(null);
+    setPendingFocus({ kind: "delete-button", projectId });
+  }
+
   function handleDeleteConfirmed() {
     if (!pendingDeleteId) return;
     const target = workspace.projects.find((p) => p.id === pendingDeleteId);
+    const remaining = workspace.projects.filter((p) => p.id !== pendingDeleteId);
     store.deleteProject(pendingDeleteId);
     setPendingDeleteId(null);
+    setPendingFocus(
+      remaining[0]
+        ? { kind: "select-button", projectId: remaining[0].id }
+        : { kind: "name-input" },
+    );
     if (target) setAnnouncement(`Project "${target.name}" deleted.`);
   }
 
@@ -65,6 +102,7 @@ function Projects() {
         <div className="project-create-row">
           <input
             id="project-name"
+            ref={nameInputRef}
             type="text"
             value={nameInput}
             onChange={(event) => {
@@ -110,7 +148,13 @@ function Projects() {
                       <button type="button" className="danger" onClick={handleDeleteConfirmed}>
                         Delete
                       </button>
-                      <button type="button" onClick={() => setPendingDeleteId(null)}>
+                      {/* Focus lands here when the confirmation appears:
+                          the safe choice for a destructive action. */}
+                      <button
+                        type="button"
+                        autoFocus
+                        onClick={() => handleCancelDelete(project.id)}
+                      >
                         Cancel
                       </button>
                     </div>
@@ -122,6 +166,10 @@ function Projects() {
                       className="project-select-button"
                       aria-label={project.name}
                       aria-pressed={isSelected}
+                      ref={(el) => {
+                        if (el) selectButtonRefs.current.set(project.id, el);
+                        else selectButtonRefs.current.delete(project.id);
+                      }}
                       onClick={() => store.selectProject(project.id)}
                     >
                       <span className="project-name">{project.name}</span>
@@ -133,6 +181,10 @@ function Projects() {
                       type="button"
                       className="project-delete"
                       aria-label={`Delete project ${project.name}`}
+                      ref={(el) => {
+                        if (el) deleteButtonRefs.current.set(project.id, el);
+                        else deleteButtonRefs.current.delete(project.id);
+                      }}
                       onClick={() => setPendingDeleteId(project.id)}
                     >
                       Delete

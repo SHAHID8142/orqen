@@ -1,3 +1,5 @@
+import { useState } from "react";
+import type { KeyboardEvent } from "react";
 import { useSettings, useSettingsStore } from "../../lib/settings/SettingsContext";
 import { MAX_RETRY_LIMIT, MIN_RETRY } from "../../lib/settings/types";
 import "./SettingsSurface.css";
@@ -12,6 +14,28 @@ import "./SettingsSurface.css";
 function SettingsSurface() {
   const settings = useSettings();
   const store = useSettingsStore();
+  // Draft for the retry field: while editing, the input shows exactly what
+  // the user typed (cleared or intermediate values are never snapped back);
+  // the value is validated and committed on blur or Enter (R3).
+  const [retryDraft, setRetryDraft] = useState<string | null>(null);
+
+  function commitRetryDraft() {
+    if (retryDraft === null) return;
+    const parsed = Number(retryDraft);
+    if (retryDraft.trim() !== "" && Number.isFinite(parsed)) {
+      store.setMaxRetry(parsed);
+    }
+    setRetryDraft(null);
+  }
+
+  function handleRetryKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitRetryDraft();
+    } else if (event.key === "Escape") {
+      setRetryDraft(null);
+    }
+  }
 
   return (
     <section aria-labelledby="settings-heading" className="settings">
@@ -64,11 +88,14 @@ function SettingsSurface() {
             type="number"
             min={MIN_RETRY}
             max={MAX_RETRY_LIMIT}
-            value={settings.maxRetry}
-            onChange={(event) => store.setMaxRetry(Number(event.target.value))}
+            value={retryDraft ?? String(settings.maxRetry)}
+            onChange={(event) => setRetryDraft(event.target.value)}
+            onBlur={commitRetryDraft}
+            onKeyDown={handleRetryKeyDown}
           />
           <span className="option-note">
-            Allowed range {MIN_RETRY}–{MAX_RETRY_LIMIT}; out-of-range values are clamped.
+            Allowed range {MIN_RETRY}–{MAX_RETRY_LIMIT}; committed on leaving
+            the field, out-of-range values are clamped.
           </span>
         </div>
       </div>
