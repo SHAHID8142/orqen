@@ -184,7 +184,7 @@ function AppShell({
               // while a selection change is in flight.
               disabled={
                 !workspaceReady ||
-                workspace.selectingId !== null ||
+                workspace.pendingAction !== null ||
                 projects.length === 0
               }
             >

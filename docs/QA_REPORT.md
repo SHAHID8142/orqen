@@ -21,6 +21,27 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 2 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` (lint → typecheck → test → build) | PASS — exit 0; **83/83 tests** |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust tests | `cargo test` | PASS — **39/39** (37 lib + 2 integration suites) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` (backgrounded, then stopped) | PASS — real app binary with the remediated code ran cleanly against the existing database (user_version 1, data and defaults intact, 0 error lines) |
+| 7 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+**Confirmed defects fixed (with regression tests):**
+
+1. **Creation contract (Task 1):** `create_project_conn` now performs INSERT + selection UPDATE in **one SQLite transaction** and reads the returned snapshot **inside** the transaction (read-your-writes) — a commit failure rolls everything back, so a reported success always matches the database. Restores the Phase 1 contract: a newly created project is selected immediately. Regression tests: creation selects the new project (unit), the selection survives reopening (unit), and the full integration lifecycle asserts it end-to-end. Frontend backend-simulation mocks already matched this behavior and were re-verified.
+2. **Mutation races (Task 2):** all workspace operations (load, create, select, delete) now run through **one serial queue** — at most one request in flight, snapshots apply strictly in issue order, so no stale response can overwrite newer state. Requests issued during an in-flight operation are queued (not silently discarded); the UI disables controls while busy; the only pre-queue rejections are client-side validation and mutations attempted while the persisted state is unavailable — both surfaced as `actionError`. Regression tests use deferred promises, including an intentionally ordered two-create sequence and a reload-issued-during-create case.
+3. **Migration & transaction safety (Task 3):** databases with `user_version` **newer** than the application supports are rejected untouched (never downgraded/reset — test asserts version and data intact and a non-destructive message); foreign-key enforcement is explicitly asserted on configured connections plus an engine-level FK violation test; mutations read their snapshot inside the transaction, eliminating ambiguous partial-success reporting.
+4. **Error handling (Task 4):** new `describe_error` sanitizes storage errors — technical details go to local logs (`eprintln`), user messages name the failed operation with recovery guidance, mapped by SQLite error code (unreadable file / permissions / busy). Corruption guidance remains non-destructive (asserted: no deletion suggestions in user-facing text).
+
+**Real integration verification (Task 5)** — `src-tauri/tests/persistence_integration.rs` against the real production functions and temporary file databases: create A (auto-selected) → create B (auto-selected) → reopen (both persist, B selected) → delete selected B (selection cleared) → select A + change settings → reopen (A selected, settings persisted) → duplicate creation rejected with no data loss → rejected invalid inputs touch nothing → concurrent mutations from 4 threads with separate connections serialize safely (all 5 projects persist). GUI automation is not available in this environment; the interactive on-screen walkthrough remains a manual checklist.
+
 ## Phase 2 · Feature 001 verification (2026-11-05, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

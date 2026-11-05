@@ -14,7 +14,9 @@
 //! - `synchronous = NORMAL`, the recommended pairing with WAL.
 //!
 //! Failure policy: a corrupted or unreadable database is never deleted or
-//! replaced. Open failures are surfaced to the UI with recovery guidance.
+//! replaced. Open failures are surfaced to the UI with recovery guidance;
+//! technical details are logged locally and sanitized out of user-facing
+//! messages.
 
 pub mod migrations;
 
@@ -34,11 +36,34 @@ pub(crate) fn temp_db_dir() -> PathBuf {
     dir
 }
 
+/// Logs the technical detail locally and returns a user-facing message
+/// without raw SQL or filesystem internals. Never suggests deleting data.
+pub(crate) fn describe_error(operation: &str, error: &rusqlite::Error) -> String {
+    eprintln!("orqen db: {operation} failed: {error}");
+    if let Some(code) = error.sqlite_error_code() {
+        return match code {
+            rusqlite::ErrorCode::NotADatabase => format!(
+                "{operation} failed: the database file is unreadable. Restore \
+                 it from a backup — your file was not modified."
+            ),
+            rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::SystemIoFailure => {
+                format!("{operation} failed: check the data directory's file permissions.")
+            }
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                format!("{operation} failed: the database is busy — try again.")
+            }
+            _ => format!("{operation} failed. Your data is untouched."),
+        };
+    }
+    format!("{operation} failed. Your data is untouched.")
+}
+
 /// Opens (or creates) the application database at `data_dir`, applies
 /// pending migrations, and configures the connection strategy.
 ///
 /// Existing data is never destroyed: reopening is a no-op apart from
-/// applying pending migrations.
+/// applying pending migrations. A database from a newer application
+/// version is rejected untouched.
 pub fn open_database(data_dir: &Path) -> Result<Connection, String> {
     std::fs::create_dir_all(data_dir)
         .map_err(|e| format!("could not create the data directory: {e}"))?;
@@ -52,8 +77,18 @@ pub fn open_database(data_dir: &Path) -> Result<Connection, String> {
     configure_connection(&conn).map_err(|e| format!("could not open the local database: {e}"))?;
 
     let mut conn = conn;
-    migrations::run_migrations(&mut conn)
-        .map_err(|e| format!("could not prepare the local database: {e}"))?;
+    migrations::run_migrations(&mut conn).map_err(|error| {
+        eprintln!("orqen db: schema preparation failed: {error:?}");
+        match error {
+            migrations::MigrationError::TooNew { .. } => error.user_message(),
+            migrations::MigrationError::Failed { .. } => {
+                format!(
+                    "could not prepare the local database: {}",
+                    error.user_message()
+                )
+            }
+        }
+    })?;
     Ok(conn)
 }
 
@@ -102,19 +137,20 @@ impl DbState {
         Ok(())
     }
 
-    /// Runs `f` with the open connection, re-attempting initialization if
-    /// a previous attempt failed, and mapping a missing connection to a
-    /// user-presentable storage error.
+    /// Runs `f` with the open connection (mutable: commands may start
+    /// transactions), re-attempting initialization if a previous attempt
+    /// failed, and mapping a missing connection to a user-presentable
+    /// storage error.
     pub fn with_conn<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, crate::error::CommandError>,
+        f: impl FnOnce(&mut Connection) -> Result<T, crate::error::CommandError>,
     ) -> Result<T, crate::error::CommandError> {
         self.ensure_connection()
             .map_err(crate::error::CommandError::Storage)?;
-        let guard = self.connection.lock().map_err(|_| {
+        let mut guard = self.connection.lock().map_err(|_| {
             crate::error::CommandError::Storage("local database is unavailable".to_string())
         })?;
-        match guard.as_ref() {
+        match guard.as_mut() {
             Some(conn) => f(conn),
             None => Err(crate::error::CommandError::Storage(
                 "local database is unavailable. Your data is untouched — try \
@@ -183,6 +219,11 @@ mod tests {
         assert!(
             message.contains("could not prepare") || message.contains("could not open"),
             "error should be user-understandable, got: {message}"
+        );
+        // No raw SQL internals or destructive advice in user-facing text.
+        assert!(
+            !message.to_lowercase().contains("delete the"),
+            "recovery guidance must not suggest deletion: {message}"
         );
         // The corrupted file is still on disk — no destructive recovery.
         assert!(

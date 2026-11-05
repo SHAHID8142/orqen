@@ -49,7 +49,7 @@ function Projects() {
   const selectedProject = projects.find(
     (p) => p.id === workspace.data.selectedProjectId,
   );
-  const busy = workspace.creating || workspace.selectingId !== null || workspace.deletingId !== null;
+  const busy = workspace.pendingAction !== null;
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -162,8 +162,8 @@ function Projects() {
             autoComplete="off"
             disabled={busy}
           />
-          <button type="submit" disabled={busy || workspace.creating}>
-            {workspace.creating ? "Creating…" : "Create project"}
+          <button type="submit" disabled={busy}>
+            {workspace.pendingAction?.kind === "create" ? "Creating…" : "Create project"}
           </button>
         </div>
         {actionError && (
@@ -207,7 +207,7 @@ function Projects() {
                       <button
                         type="button"
                         className="danger"
-                        disabled={workspace.deletingId !== null}
+                        disabled={busy}
                         onClick={() => {
                           void handleDeleteConfirmed();
                         }}
@@ -219,7 +219,7 @@ function Projects() {
                       <button
                         type="button"
                         autoFocus
-                        disabled={workspace.deletingId !== null}
+                        disabled={busy}
                         onClick={() => {
                           void handleCancelDelete(project.id);
                         }}

@@ -7,8 +7,8 @@ Single source of truth for "where is the project right now". Updated at every me
 | Field | Value |
 | --- | --- |
 | **Phase** | 2 — Local Persistence (SQLite) & Settings |
-| **Feature** | 001 — SQLite Persistence & Settings Integration |
-| **Progress** | Feature implemented end-to-end: SQLite (rusqlite/WAL) owned by Rust, transactional migrations (v1), projects + selection + settings persisted and restored across restarts, frontend stores converged on backend snapshots with loading/error/retry states. **80 frontend + 33 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
+| **Feature** | 001 — SQLite Persistence & Settings (review remediation complete) |
+| **Progress** | Remediation delivered: creation auto-selects atomically (single transaction, in-transaction snapshot), all workspace operations serialized (no stale snapshots), future schema versions rejected untouched, storage errors sanitized with local diagnostics. **83 frontend + 39 Rust tests (incl. 2 integration suites) pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
 | **Blockers** | **CI blocked externally** (see [QA_REPORT.md](QA_REPORT.md) CI verification) — external to the repository; rerun path documented there. |
 | **Next review checkpoint** | Manual review of Phase 2 Feature 001 (incl. the manual restart checklist in the final report) |
 | **Next feature (after approval)** | Phase 3 — Agent Registry & Adapters ([ROADMAP.md](ROADMAP.md)) |
@@ -34,9 +34,9 @@ Single source of truth for "where is the project right now". Updated at every me
 | --- | --- |
 | A — Database foundation (location, connection strategy, failure policy) | Done — 4 Rust tests (incl. corruption never deleted) |
 | B — Schema & transactional migrations (v1) | Done — 7 Rust tests (idempotence, rollback, constraints, FK) |
-| C — Persistent project operations | Done — 5 Rust command-level tests (CRUD, duplicates, unknown ids, reopen survival) |
+| C — Persistent project operations | Done — atomic create/select/delete (transactional, in-transaction snapshots); regression tests incl. auto-select contract + reopen survival |
 | D — Settings persistence | Done — 5 Rust tests (defaults, updates, restore, invalid rejected, reopen survival) |
-| E — React state integration (loading/ready/error, retry, pending guards, snapshot convergence) | Done — 24 store tests |
+| E — React state integration (loading/ready/error, retry, serial mutation queue, snapshot convergence) | Done — 24 store tests incl. deferred-reorder races |
 | F — Error handling & data safety | Done (storage error kind, recovery guidance, no auto-reset; verified in tests) |
 | G — Automated testing | Done — 33 Rust + 80 frontend tests |
 | H — Restart verification | DB level verified (real-launch probe); interactive GUI restart → manual checklist |
@@ -59,3 +59,4 @@ Single source of truth for "where is the project right now". Updated at every me
 - **2026-11-05** — Feature 001 review remediation: overlay sidebar focus management (always-mounted `hidden` sidebar with valid `aria-controls`, focus into sidebar on open, focus restored to toggle on Escape/backdrop/toggle), project delete-confirmation focus flow (Cancel focused on appear, Delete restored on cancel, surviving project or name input after delete), retry preference draft editing (free typing, commit on blur/Enter, Escape reverts, clamp on commit). 62 frontend tests passing; L-012/L-013 lessons recorded.
 - **2026-11-05** — Feature 001 final accessibility fix: narrow overlay is now a fully contained modal drawer (skip link + header + main `inert` while open, `role="dialog"`/`aria-modal`, in-drawer close button, effect-based focus restoration to the toggle). Real-browser keyboard verification found and fixed a Chromium wrap-around defect across `inert` regions (explicit boundary wrap added, overlay mode only). 70 frontend tests passing; L-014 recorded.
 - **2026-11-05** — Phase 2 · Feature 001 delivered: SQLite persistence via rusqlite (WAL, foreign keys, busy timeout), transactional migrations (v1), projects + selection + settings persisted across restarts, snapshot-convergent frontend stores with loading/error/retry states. D-014 recorded; 80 frontend + 33 Rust tests; real-launch restart probe verified (data preserved, no wipe).
+- **2026-11-06** — Phase 2 · Feature 001 review remediation: creation auto-selects atomically (D-015), serial mutation queue in the frontend store (no stale snapshots, queued-not-discarded requests), future schema versions rejected untouched, sanitized storage errors with local diagnostics; real integration test suite added (lifecycle + concurrent serialization). 83 frontend + 39 Rust tests; L-015/L-016 recorded.

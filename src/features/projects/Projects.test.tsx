@@ -223,9 +223,8 @@ describe("Projects surface — delete focus management", () => {
     );
     await waitFor(() => {
       expect(screen.getByRole("status")).toHaveTextContent(/deleted/);
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "B" }));
     });
-    expect(screen.getByRole("button", { name: "B" })).toBeInTheDocument();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "B" }));
   });
 
   it("focuses the name input when the last project is deleted", async () => {
@@ -246,7 +245,7 @@ describe("Projects surface — delete focus management", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("projects-empty")).toBeInTheDocument();
+      expect(document.activeElement).toBe(screen.getByLabelText("New project name"));
     });
-    expect(document.activeElement).toBe(screen.getByLabelText("New project name"));
   });
 });

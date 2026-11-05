@@ -31,7 +31,7 @@ pub struct SettingsInput {
     pub telegram_notifications: bool,
 }
 
-pub(crate) fn load_settings_conn(conn: &Connection) -> Result<SettingsDto, String> {
+pub fn load_settings_conn(conn: &Connection) -> Result<SettingsDto, String> {
     let (approval_mode, max_retry, telegram): (String, i64, i64) = conn
         .query_row(
             "SELECT approval_mode, max_retry, telegram_notifications FROM settings WHERE id = 1",
@@ -46,7 +46,7 @@ pub(crate) fn load_settings_conn(conn: &Connection) -> Result<SettingsDto, Strin
     })
 }
 
-pub(crate) fn update_settings_conn(
+pub fn update_settings_conn(
     conn: &Connection,
     input: &SettingsInput,
 ) -> Result<SettingsDto, CommandError> {

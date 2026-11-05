@@ -43,35 +43,86 @@ pub fn current_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
         .map(|v| v.max(0) as u32)
 }
 
+/// Why preparing the schema failed. `TooNew` reaches the user verbatim;
+/// `Failed` details are logged locally and sanitized before display.
+#[derive(Debug)]
+pub enum MigrationError {
+    /// The database was written by a newer application version.
+    TooNew { version: u32 },
+    /// A migration failed and rolled back; the payload holds the technical
+    /// detail for local logs only.
+    Failed { version: u32, detail: String },
+}
+
+impl MigrationError {
+    /// User-facing message. Never suggests deleting the database.
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::TooNew { version } => format!(
+                "this database uses schema version {version}, which is newer \
+                 than this application supports. Update Orqen to a newer \
+                 version or restore a compatible backup — your data was not \
+                 modified."
+            ),
+            Self::Failed { version, .. } => format!(
+                "the local database could not be prepared (migration {version} \
+                 failed). Nothing was changed — try restarting the application."
+            ),
+        }
+    }
+}
+
 /// Applies all pending migrations in order, each in its own transaction.
 ///
-/// Idempotent: re-running on an up-to-date database is a no-op.
-pub fn run_migrations(conn: &mut Connection) -> Result<(), String> {
+/// Idempotent: re-running on an up-to-date database is a no-op. A database
+/// from a newer application version is rejected untouched — never
+/// downgraded, reset, or modified.
+pub fn run_migrations(conn: &mut Connection) -> Result<(), MigrationError> {
     run_migrations_with(conn, MIGRATIONS)
 }
 
 /// Testable variant: runs an explicit migration list.
-pub fn run_migrations_with(conn: &mut Connection, migrations: &[&str]) -> Result<(), String> {
-    let mut version = current_version(conn).map_err(|e| e.to_string())?;
+pub fn run_migrations_with(
+    conn: &mut Connection,
+    migrations: &[&str],
+) -> Result<(), MigrationError> {
+    let mut version = current_version(conn).map_err(|e| MigrationError::Failed {
+        version: 0,
+        detail: e.to_string(),
+    })?;
+
+    // Future/unsupported schema: fail safely, touch nothing.
+    if version as usize > migrations.len() {
+        return Err(MigrationError::TooNew { version });
+    }
+
     for (index, sql) in migrations.iter().enumerate() {
         let target = (index + 1) as u32;
         if target <= version {
             continue;
         }
-        let transaction = conn
-            .transaction()
-            .map_err(|e| format!("could not begin migration {target}: {e}"))?;
+        let transaction = conn.transaction().map_err(|e| MigrationError::Failed {
+            version: target,
+            detail: format!("could not begin transaction: {e}"),
+        })?;
         // execute_batch runs every statement; any failure rolls the whole
         // transaction back (schema changes included).
         transaction
             .execute_batch(sql)
-            .map_err(|e| format!("migration {target} failed: {e}"))?;
+            .map_err(|e| MigrationError::Failed {
+                version: target,
+                detail: e.to_string(),
+            })?;
         transaction
             .pragma_update(None, "user_version", target)
-            .map_err(|e| format!("migration {target} could not record version: {e}"))?;
-        transaction
-            .commit()
-            .map_err(|e| format!("migration {target} could not commit: {e}"))?;
+            .map_err(|e| MigrationError::Failed {
+                version: target,
+                detail: format!("could not record version: {e}"),
+            })?;
+        transaction.commit().map_err(|e| MigrationError::Failed {
+            version: target,
+            detail: format!("could not commit: {e}"),
+        })?;
         version = target;
     }
     Ok(())
@@ -243,6 +294,53 @@ mod tests {
             selected, None,
             "ON DELETE SET NULL must clear the selection"
         );
+    }
+
+    #[test]
+    fn future_schema_versions_are_rejected_untouched() {
+        let mut conn = open_mem();
+        run_migrations_with(&mut conn, MIGRATIONS).expect("v1 applies");
+        // Simulate a database written by a future application version.
+        conn.pragma_update(None, "user_version", 99)
+            .expect("set future version");
+        conn.execute(
+            "INSERT INTO projects (id, name, created_at) VALUES ('p1', 'Precious', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed data");
+
+        let error =
+            run_migrations_with(&mut conn, MIGRATIONS).expect_err("future schema must be rejected");
+        match &error {
+            MigrationError::TooNew { version } => assert_eq!(*version, 99),
+            other => panic!("expected TooNew, got: {other:?}"),
+        }
+        // The database was not modified: version and data intact.
+        assert_eq!(current_version(&conn).expect("version"), 99);
+        let name: String = conn
+            .query_row("SELECT name FROM projects WHERE id='p1'", [], |row| {
+                row.get(0)
+            })
+            .expect("data intact");
+        assert_eq!(name, "Precious");
+        assert!(error.user_message().contains("not modified"));
+        assert!(!error.user_message().to_lowercase().contains("delete"));
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced_on_configured_connections() {
+        // Explicit verification: FK enforcement is per-connection in SQLite
+        // and must be ON for connections configured by our layer.
+        let mut conn = open_mem();
+        run_migrations_with(&mut conn, MIGRATIONS).expect("migrations");
+        crate::db::configure_connection(&conn).expect("configure");
+        let enabled: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys pragma");
+        assert_eq!(enabled, 1, "foreign keys must be explicitly enabled");
+        // Referencing a nonexistent project must be rejected by the engine.
+        let violation = conn.execute("UPDATE settings SET selected_project_id = 'ghost'", []);
+        assert!(violation.is_err(), "FK must reject unknown project ids");
     }
 
     #[test]

@@ -4,11 +4,20 @@
  * Framework-agnostic observable store bound to React via
  * `useSyncExternalStore`. All data lives in the Rust core (SQLite); the
  * store holds the last valid backend snapshot and applies every fresh
- * snapshot returned by a mutation, so UI and database never diverge.
+ * snapshot returned by an operation, so UI and database never diverge.
  * IPC functions are injectable for tests.
+ *
+ * Concurrency strategy (docs/ARCHITECTURE.md §Persistence): every
+ * operation — load, create, select, delete — runs through one serial
+ * queue. At most one request is in flight, responses apply strictly in
+ * issue order, and no snapshot can be overwritten by an older response.
+ * Requests issued while one is in flight are queued (not discarded) and
+ * the UI disables the controls meanwhile; the only pre-queue rejections
+ * are client-side validation failures and mutations attempted while the
+ * persisted state is unavailable, both surfaced as `actionError`.
  */
 import type { CommandErrorPayload } from "../../types/app";
-import type { Project, WorkspaceSnapshot } from "./types";
+import type { WorkspaceSnapshot } from "./types";
 import { validateProjectName, type WorkspaceState } from "./types";
 
 /** IPC surface of the store (matches `lib/ipc/workspace.ts`). */
@@ -18,6 +27,13 @@ export interface WorkspaceIpc {
   select: (id: string) => Promise<WorkspaceSnapshot>;
   remove: (id: string) => Promise<WorkspaceSnapshot>;
 }
+
+/** The operation currently in flight (drives busy UI states). */
+export type PendingAction =
+  | { kind: "load" }
+  | { kind: "create" }
+  | { kind: "select"; id: string }
+  | { kind: "delete"; id: string };
 
 export interface WorkspaceStore {
   getState: () => WorkspaceState;
@@ -39,12 +55,20 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
     data: { projects: [], selectedProjectId: null },
     loadError: null,
     actionError: null,
-    creating: false,
-    selectingId: null,
-    deletingId: null,
+    pendingAction: { kind: "load" },
   };
   const listeners = new Set<() => void>();
-  let loadInFlight = false;
+
+  // Serial operation queue: strictly ordered, at most one in flight.
+  let queue: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = queue.then(task, task);
+    queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
   function setState(next: Partial<WorkspaceState>) {
     state = { ...state, ...next };
@@ -62,73 +86,105 @@ export function createWorkspaceStore(ipc: WorkspaceIpc): WorkspaceStore {
   }
 
   async function load(): Promise<void> {
-    if (loadInFlight) return; // prevent duplicate loads
-    loadInFlight = true;
-    const hadData = state.phase === "ready";
-    setState({ phase: "loading", loadError: null });
-    try {
-      const snapshot = await ipc.load();
-      applySnapshot(snapshot);
-      setState({ loadError: null });
-    } catch (error) {
-      const loadError = normalizeError(error);
-      // A failed reload keeps the previous valid state; only the first
-      // load failure puts the store into the error phase.
-      if (hadData) {
-        setState({ phase: "ready", loadError });
-      } else {
-        setState({
-          phase: "error",
-          loadError,
-          data: { projects: [], selectedProjectId: null },
-        });
+    return enqueue(async () => {
+      const hadData = state.phase === "ready";
+      setState({ phase: "loading", loadError: null, pendingAction: { kind: "load" } });
+      try {
+        const snapshot = await ipc.load();
+        applySnapshot(snapshot);
+        setState({ loadError: null, pendingAction: null });
+      } catch (error) {
+        const loadError = normalizeError(error);
+        // A failed reload keeps the previous valid state; only the first
+        // load failure puts the store into the error phase.
+        if (hadData) {
+          setState({ phase: "ready", loadError, pendingAction: null });
+        } else {
+          setState({
+            phase: "error",
+            loadError,
+            pendingAction: null,
+            data: { projects: [], selectedProjectId: null },
+          });
+        }
       }
-    } finally {
-      loadInFlight = false;
-    }
+    });
   }
 
   async function create(rawName: string): Promise<void> {
-    if (state.creating || state.phase !== "ready") return;
-    const validationError = validateProjectName(rawName, state.data.projects);
-    if (validationError) {
-      setState({ actionError: validationMessage(validationError) });
-      return;
-    }
-    const name = rawName.trim(); // match the Rust-side normalization
-    setState({ creating: true, actionError: null });
-    try {
-      const snapshot = await ipc.create(name);
-      setState({ creating: false });
-      applySnapshot(snapshot);
-    } catch (error) {
-      setState({ creating: false, actionError: normalizeError(error) });
-    }
+    return enqueue(async () => {
+      // Mutations require the persisted snapshot; without it there is
+      // nothing safe to mutate against.
+      if (state.phase !== "ready") {
+        setState({
+          actionError: {
+            kind: "storage",
+            message: "Projects are unavailable right now — retry loading first.",
+          },
+        });
+        return;
+      }
+      const validationError = validateProjectName(rawName, state.data.projects);
+      if (validationError) {
+        setState({ actionError: validationMessage(validationError) });
+        return;
+      }
+      const name = rawName.trim(); // match the Rust-side normalization
+      setState({ pendingAction: { kind: "create" }, actionError: null });
+      try {
+        const snapshot = await ipc.create(name);
+        applySnapshot(snapshot);
+        setState({ pendingAction: null });
+      } catch (error) {
+        setState({ pendingAction: null, actionError: normalizeError(error) });
+      }
+    });
   }
 
   async function select(id: string): Promise<void> {
-    if (state.selectingId !== null || state.phase !== "ready") return;
-    if (state.data.selectedProjectId === id) return; // no-op selection
-    setState({ selectingId: id, actionError: null });
-    try {
-      const snapshot = await ipc.select(id);
-      setState({ selectingId: null });
-      applySnapshot(snapshot);
-    } catch (error) {
-      setState({ selectingId: null, actionError: normalizeError(error) });
-    }
+    return enqueue(async () => {
+      if (state.phase !== "ready") {
+        setState({
+          actionError: {
+            kind: "storage",
+            message: "Projects are unavailable right now — retry loading first.",
+          },
+        });
+        return;
+      }
+      if (state.data.selectedProjectId === id) return; // no-op selection
+      setState({ pendingAction: { kind: "select", id }, actionError: null });
+      try {
+        const snapshot = await ipc.select(id);
+        applySnapshot(snapshot);
+        setState({ pendingAction: null });
+      } catch (error) {
+        setState({ pendingAction: null, actionError: normalizeError(error) });
+      }
+    });
   }
 
   async function remove(id: string): Promise<void> {
-    if (state.deletingId !== null || state.phase !== "ready") return;
-    setState({ deletingId: id, actionError: null });
-    try {
-      const snapshot = await ipc.remove(id);
-      setState({ deletingId: null });
-      applySnapshot(snapshot);
-    } catch (error) {
-      setState({ deletingId: null, actionError: normalizeError(error) });
-    }
+    return enqueue(async () => {
+      if (state.phase !== "ready") {
+        setState({
+          actionError: {
+            kind: "storage",
+            message: "Projects are unavailable right now — retry loading first.",
+          },
+        });
+        return;
+      }
+      if (!state.data.projects.some((p) => p.id === id)) return; // unknown id: nothing to delete
+      setState({ pendingAction: { kind: "delete", id }, actionError: null });
+      try {
+        const snapshot = await ipc.remove(id);
+        applySnapshot(snapshot);
+        setState({ pendingAction: null });
+      } catch (error) {
+        setState({ pendingAction: null, actionError: normalizeError(error) });
+      }
+    });
   }
 
   return {
@@ -178,5 +234,3 @@ function normalizeError(error: unknown): CommandErrorPayload {
     message: error instanceof Error ? error.message : String(error),
   };
 }
-
-export type { Project };

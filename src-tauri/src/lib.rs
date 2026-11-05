@@ -5,9 +5,9 @@
 //! - `commands`: Tauri IPC commands exposed to the frontend.
 //! - `error`: shared structured error type for commands.
 
-mod commands;
-mod db;
-mod error;
+pub mod commands;
+pub mod db;
+pub mod error;
 
 use db::DbState;
 use tauri::Manager;

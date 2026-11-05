@@ -103,6 +103,9 @@ describe("App shell navigation", () => {
     installBackendSimulation();
   });
 
+  /** Lets queued store operations start before mid-flight assertions. */
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
   function renderApp() {
     return render(
       <App
@@ -248,6 +251,7 @@ describe("App shell navigation", () => {
         }),
     });
     renderApp();
+    await flush(); // let the queued load reach the (pending) IPC call
 
     const selector = screen.getByRole("combobox", { name: "Project" });
     expect(selector).toBeDisabled();

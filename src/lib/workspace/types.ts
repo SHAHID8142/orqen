@@ -25,18 +25,26 @@ export interface WorkspaceData {
 /** Overall persistence phase. `error` means no valid snapshot exists yet. */
 export type WorkspacePhase = "loading" | "ready" | "error";
 
+/**
+ * The single operation currently in flight (all workspace operations run
+ * through one serial queue — see store.ts). Drives busy UI states.
+ */
+export type PendingAction =
+  | { kind: "load" }
+  | { kind: "create" }
+  | { kind: "select"; id: string }
+  | { kind: "delete"; id: string };
+
 /** Full observable workspace state. */
 export interface WorkspaceState {
   phase: WorkspacePhase;
   data: WorkspaceData;
   /** Load failure when no valid snapshot exists yet (drives the retry UI). */
   loadError: CommandErrorPayload | null;
-  /** Failure of the latest mutating action (shown near the controls). */
+  /** Failure of the latest operation (shown near the controls). */
   actionError: CommandErrorPayload | null;
-  /** In-flight guards — prevent duplicate requests and races. */
-  creating: boolean;
-  selectingId: string | null;
-  deletingId: string | null;
+  /** The queued or in-flight operation, or null when idle. */
+  pendingAction: PendingAction | null;
 }
 
 /** Result of client-side validation for a new project name. */
