@@ -58,6 +58,27 @@ Test-type transparency: Rust unit tests use **controlled fixture executables** (
 4. **Discovery truthfulness (Task 5):** on unix, discovery now requires the execute bit (permission bits) — a non-executable same-named file is skipped (regression test); symlinks to executables resolve and broken symlinks are skipped (regression tests). Windows continues to use the extension allowlist as its (documented, weaker) signal.
 5. **Main Agent UX (Task 4):** Agents screen shows settings loading ("Loading preferences…"), an actionable settings-error card with Retry, and save failures via `role="alert"` while preserving the last valid preference; the radios are disabled until settings load successfully. The settings store no longer silently drops updates — operations issued while saving are queued in order (last write wins) and unavailable-state operations surface an error. Regression tests: delayed load, failed load + retry, failed save + preservation, rapid ordered selections.
 
+## Phase 3 · Feature 001 final remediation verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` | PASS — exit 0; **109/109 tests** |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust tests | `cargo test` | PASS — **70/70** (66 lib incl. 13 verify-lifecycle tests, 4 integration) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` | PASS — schema v2, data intact, 0 error lines |
+| 7 | **Real-browser Retry verification** | in-app browser against `npm run dev` (backend absent = genuine failure state) | PASS — the error card's Retry button is enabled, **real clicks** (×2) and a real Enter keypress each re-trigger the load (error correctly persists without a backend); no page freeze |
+| 8 | **Process-tree cleanup** | orphan-process check after the timeout suite | PASS — **no lingering `sleep 30` orphans** after the process-group kill (previously each timeout probe orphaned one) |
+| 9 | Reader cleanup timing | `active_detached_readers()` decay tests | PASS — abandoned readers release when descendants exit (deterministic with the process-group kill) |
+| 10 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+**Confirmed defects fixed:**
+
+1. **Disabled settings Retry (Task 1):** the settings error card + Retry moved OUTSIDE the disabled preference fieldset — the Retry control is enabled exactly when the preferences are unavailable, radios stay disabled until settings load, and the full failed-load → Retry → successful-load → selection flow is covered by regression tests (jsdom) and verified with real browser clicks + keyboard (Task 5).
+2. **Process lifecycle (Task 2):** the probe spawns in its own **process group** (`process_group(0)`, unix) and timeout/cleanup terminates the **whole tree** via `killpg(SIGKILL)` — an orphaned descendant can no longer hold the inherited pipes open for 30s (regression: the timeout fixture previously left a live `sleep 30` orphan; now zero lingering processes after the suite). Reader abandonment keeps bounded memory (64 KiB/stream) and every reader exit path releases the global detached counter; the counter bound (64, logged) documents the platform limitation where tree-kill is unavailable (Windows — direct child only).
+3. **Stale-binary measurement trap (Lesson L-020):** during diagnosis, cargo served a **stale test binary** after source edits (external-SSD mtime granularity) — counter readings that contradicted the instrumented code were from the old leaky build. Force-rebuild (`cargo clean -p orqen`) resolved the contradiction.
+
 ## Phase 2 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

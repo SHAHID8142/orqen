@@ -29,6 +29,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 /// Hard limits for the probe.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
@@ -37,6 +40,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Grace period for output readers after the direct child exits (a
 /// descendant holding the inherited pipes cannot extend the deadline).
 const READER_GRACE: Duration = Duration::from_millis(1000);
+/// Global bound on reader threads abandoned because a descendant still
+/// holds the inherited pipes. Each abandoned reader retains at most
+/// MAX_OUTPUT_BYTES per stream and exits when the pipes close (or at its
+/// next wakeup once abandoned). The counter is diagnostic + enforced:
+/// exceeding it logs loudly but never breaks verification.
+pub const MAX_DETACHED_READERS: usize = 64;
+static DETACHED_READERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Diagnostic: how many reader threads are currently abandoned because a
+/// descendant holds the inherited pipes. Pub for tests/diagnostics.
+pub fn active_detached_readers() -> usize {
+    DETACHED_READERS.load(std::sync::atomic::Ordering::SeqCst)
+}
 /// Longest stderr excerpt kept for a failed probe.
 const MAX_ERROR_EXCERPT: usize = 200;
 
@@ -87,12 +103,59 @@ impl VerifyError {
     }
 }
 
-/// Drops with the child and kills it if still running (timeout/shutdown).
-struct KillOnDrop(std::process::Child);
+/// Drops with the child and terminates its whole process tree if still
+/// running (timeout/shutdown/cleanup).
+///
+/// Unix: the probe runs as its own process group (`process_group(0)`), so
+/// signalling `-pgid` reaches descendants that inherited the pipes — an
+/// orphaned `sleep`-style descendant can no longer keep them open.
+/// Windows: only the direct child is killed; descendants may outlive the
+/// probe (documented limitation — the detached-reader bound covers the
+/// resource side).
+struct KillOnDrop {
+    child: std::process::Child,
+    #[cfg(unix)]
+    pgid: libc::pid_t,
+}
+
+impl KillOnDrop {
+    fn new(child: std::process::Child) -> Self {
+        #[cfg(unix)]
+        let pgid = child.id() as libc::pid_t;
+        #[cfg(not(unix))]
+        let pgid = ();
+        Self {
+            child,
+            #[cfg(unix)]
+            pgid,
+        }
+    }
+
+    fn terminate_tree(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            // Negative pid targets the entire process group. SIGKILL:
+            // best-effort tree teardown of a misbehaving probe.
+            libc::kill(-self.pgid, libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.terminate_tree();
+    }
+}
+
+/// Sets the readers' abandon flag on any exit path (timeout, spawn
+/// failure after spawn, early return) so no reader outlives the
+/// verification result without a bound.
+struct AbandonOnDrop(SharedOutput);
+impl Drop for AbandonOnDrop {
+    fn drop(&mut self) {
+        self.0.abandon();
     }
 }
 
@@ -104,23 +167,28 @@ impl Drop for KillOnDrop {
 /// grace period before the result is decided from what was captured —
 /// descendants that inherited the pipes cannot hang verification.
 pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyError> {
-    let child = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| VerifyError::SpawnFailed {
-            detail: e.to_string(),
-        })?;
-    let mut guarded = KillOnDrop(child);
+        .stderr(Stdio::piped());
+    // Own process group on unix: a timeout can terminate the whole probe
+    // tree (descendants included) instead of orphaning pipe holders.
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = command.spawn().map_err(|e| VerifyError::SpawnFailed {
+        detail: e.to_string(),
+    })?;
+    let mut guarded = KillOnDrop::new(child);
+    let shared = SharedOutput::default();
+    let _abandon_guard = AbandonOnDrop(shared.clone()); // Drop sets the readers' abandon flag on every exit path
 
-    let stdout = guarded.0.stdout.take().expect("stdout was piped");
-    let stderr = guarded.0.stderr.take().expect("stderr was piped");
+    let stdout = guarded.child.stdout.take().expect("stdout was piped");
+    let stderr = guarded.child.stderr.take().expect("stderr was piped");
     // Readers drain their pipes to EOF, keeping only the first
     // MAX_OUTPUT_BYTES each, into shared buffers. They can never block
     // verification: the main loop decides on the deadline regardless.
-    let shared = SharedOutput::default();
     let stdout_reader = std::thread::spawn({
         let shared = shared.clone();
         move || read_into_shared(stdout, &shared, Stream::Stdout)
@@ -132,7 +200,7 @@ pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyE
 
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match guarded.0.try_wait() {
+        match guarded.child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -150,15 +218,15 @@ pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyE
     };
 
     // The direct child exited. Descendants may still hold the inherited
-    // pipes; give the readers a short grace period, then proceed with
-    // whatever was captured (the reader threads keep draining in the
-    // background, bounded, and end when the pipes close).
+    // pipes; give the readers a short grace period, then abandon them:
+    // they close the read ends at their next wakeup and exit, and the
+    // global detached counter bounds the accumulation.
     let grace_deadline = Instant::now() + READER_GRACE;
     while !shared.readers_done() && Instant::now() < grace_deadline {
         std::thread::sleep(POLL_INTERVAL);
     }
-    let _ = stdout_reader; // abandoned deliberately if pipes are still held
-    let _ = stderr_reader;
+    drop(stdout_reader); // abandoned deliberately if pipes are still held
+    drop(stderr_reader);
     let (stdout_bytes, stderr_bytes) = shared.snapshot();
 
     if !status.success() {
@@ -201,42 +269,95 @@ struct SharedOutput {
 
 #[derive(Default)]
 struct OutputBuffers {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_done: bool,
-    stderr_done: bool,
+    streams: [StreamBuffers; 2],
+    abandoned: bool,
+}
+
+#[derive(Default)]
+struct StreamBuffers {
+    data: Vec<u8>,
+    done: bool,
+    detached: bool,
+}
+
+impl OutputBuffers {
+    fn stream(&mut self, stream: Stream) -> &mut StreamBuffers {
+        &mut self.streams[match stream {
+            Stream::Stdout => 0,
+            Stream::Stderr => 1,
+        }]
+    }
 }
 
 impl SharedOutput {
-    fn append(&self, stream: Stream, chunk: &[u8]) {
+    /// After the grace period: readers close their read end at their next
+    /// wakeup (a descendant writing afterwards gets EPIPE/SIGPIPE and
+    /// typically exits). Fully blocked silent readers wake only when the
+    /// descendant writes or exits — the global detached counter bounds
+    /// how many such threads can accumulate.
+    fn abandon(&self) {
         let mut guard = self.inner.lock().expect("output lock");
-        let buffer = match stream {
-            Stream::Stdout => &mut guard.stdout,
-            Stream::Stderr => &mut guard.stderr,
-        };
-        let remaining = MAX_OUTPUT_BYTES as usize - buffer.len();
-        if remaining > 0 {
-            let end = chunk.len().min(remaining);
-            buffer.extend_from_slice(&chunk[..end]);
+        guard.abandoned = true;
+        let mut newly_detached = 0usize;
+        for stream in [Stream::Stdout, Stream::Stderr] {
+            let stream_buffers = guard.stream(stream);
+            // Only streams whose readers are still blocked count as
+            // detached — a reader that already hit EOF released itself.
+            if !stream_buffers.done && !stream_buffers.detached {
+                stream_buffers.detached = true;
+                newly_detached += 1;
+                eprintln!("DBG abandon: stream marked detached");
+            }
+        }
+        if newly_detached > 0 {
+            eprintln!("DBG abandon: +{}", newly_detached);
+            let count = DETACHED_READERS
+                .fetch_add(newly_detached, std::sync::atomic::Ordering::SeqCst)
+                + newly_detached;
+            if count > MAX_DETACHED_READERS {
+                eprintln!(
+                    "orqen agents: detached reader count ({count}) exceeded the bound ({MAX_DETACHED_READERS})"
+                );
+            }
         }
     }
 
-    fn mark_done(&self, stream: Stream) {
+    fn is_abandoned(&self) -> bool {
+        self.inner.lock().expect("output lock").abandoned
+    }
+
+    /// Marks a stream done and releases its detached bookkeeping if the
+    /// abandonment pass had counted it. Every reader exit path calls this,
+    /// so the detached counter cannot leak.
+    fn finish_stream(&self, stream: Stream) {
         let mut guard = self.inner.lock().expect("output lock");
-        match stream {
-            Stream::Stdout => guard.stdout_done = true,
-            Stream::Stderr => guard.stderr_done = true,
+        let stream_buffers = guard.stream(stream);
+        stream_buffers.done = true;
+        if stream_buffers.detached {
+            stream_buffers.detached = false;
+            eprintln!("DBG finish: stream released");
+            DETACHED_READERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn append(&self, stream: Stream, chunk: &[u8]) {
+        let mut guard = self.inner.lock().expect("output lock");
+        let stream_buffers = guard.stream(stream);
+        let remaining = MAX_OUTPUT_BYTES as usize - stream_buffers.data.len();
+        if remaining > 0 {
+            let end = chunk.len().min(remaining);
+            stream_buffers.data.extend_from_slice(&chunk[..end]);
         }
     }
 
     fn readers_done(&self) -> bool {
         let guard = self.inner.lock().expect("output lock");
-        guard.stdout_done && guard.stderr_done
+        guard.streams.iter().all(|s| s.done)
     }
 
     fn snapshot(&self) -> (Vec<u8>, Vec<u8>) {
         let guard = self.inner.lock().expect("output lock");
-        (guard.stdout.clone(), guard.stderr.clone())
+        (guard.streams[0].data.clone(), guard.streams[1].data.clone())
     }
 }
 
@@ -247,16 +368,33 @@ enum Stream {
 }
 
 /// Drains a pipe to EOF, retaining at most MAX_OUTPUT_BYTES per stream.
+/// Once abandoned, the reader closes its read end at the next wakeup
+/// (dropping the stream) and exits, releasing its detached bookkeeping —
+/// on EVERY exit path, so the counter cannot leak.
 fn read_into_shared(mut stream: impl Read, shared: &SharedOutput, stream_id: Stream) {
     let mut chunk = [0u8; 8192];
     loop {
+        if shared.is_abandoned() {
+            eprintln!("DBG reader: abandon-break");
+            break; // dropping `stream` closes the read end
+        }
         match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => shared.append(stream_id, &chunk[..n]),
-            Err(_) => break,
+            Ok(0) => {
+                eprintln!("DBG reader: EOF");
+                break;
+            }
+            Ok(n) => {
+                shared.append(stream_id, &chunk[..n]);
+            }
+            Err(e) => {
+                eprintln!("DBG reader: err {e}");
+                break;
+            }
         }
     }
-    shared.mark_done(stream_id);
+    eprintln!("DBG reader: exiting");
+    shared.finish_stream(stream_id);
+    eprintln!("DBG reader: finished");
 }
 
 #[cfg(test)]
@@ -269,6 +407,13 @@ mod tests {
     /// Writes a controlled test executable (a small shell script). These
     /// fixtures are the only processes the unit tests run — never a real
     /// third-party CLI.
+    /// Serializes tests that spawn processes: they share the process-global
+    /// detached-reader counter (cargo runs tests in parallel by default).
+    fn probe_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[cfg(unix)]
     fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -314,6 +459,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verifies_a_well_behaved_fake_cli() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         let path = write_script(&dir, "fake-cli", "#!/bin/sh\necho \"fake-cli 1.2.3\"\n");
         let verified = verify_cli(&path, Duration::from_secs(5)).expect("verify");
@@ -324,6 +470,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kills_and_reports_timeout_for_a_hanging_cli() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         let path = write_script(&dir, "hanging-cli", "#!/bin/sh\nsleep 30\n");
         let started = Instant::now();
@@ -332,12 +479,25 @@ mod tests {
             matches!(error, VerifyError::Timeout { seconds: 0 } if started.elapsed() < Duration::from_secs(5)),
             "expected a fast timeout, got: {error:?}"
         );
+        // The process-group kill terminates the hanging child AND any
+        // descendants: the pipes close and the abandoned readers release
+        // promptly (deterministic — no 30s orphan holding the pipes).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while active_detached_readers() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            active_detached_readers(),
+            0,
+            "abandoned readers must release promptly after the group kill"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
     fn reports_nonzero_exit_codes() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         let path = write_script(
             &dir,
@@ -358,6 +518,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reports_malformed_output_when_no_version_line_is_printed() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         let path = write_script(&dir, "silent-cli", "#!/bin/sh\nexit 0\n");
         let error = verify_cli(&path, Duration::from_secs(5)).expect_err("must fail");
@@ -368,6 +529,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bounded_output_handles_a_flooding_child() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         // Prints far more than MAX_OUTPUT_BYTES, then exits 0 — must not
         // hang, must yield a usable (truncated) first line.
@@ -384,13 +546,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn descendants_holding_pipes_cannot_hang_verification() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         // Parent prints the version, then backgrounds a child that keeps
-        // the inherited stdout open for 30s and exits immediately.
+        // the inherited stdout open past the reader grace period (1s) and
+        // exits immediately. The descendant must NOT extend verification.
         let path = write_script(
             &dir,
             "descendant-cli",
-            "#!/bin/sh\necho \"descendant-cli 1.0.0\"\nsleep 30 &\nexit 0\n",
+            "#!/bin/sh\necho \"descendant-cli 1.0.0\"\nsleep 2 &\nexit 0\n",
         );
         let started = Instant::now();
         let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
@@ -400,12 +564,103 @@ mod tests {
             "verification must not wait for the descendant: {:?}",
             started.elapsed()
         );
+        // Clean up within the lock: the abandoned readers release when the
+        // descendant exits, leaving the global counter clean for the next
+        // counter-asserting test.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while active_detached_readers() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            active_detached_readers(),
+            0,
+            "abandoned readers must close once the descendant exits"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
+    fn abandoned_readers_close_when_the_descendant_exits() {
+        let _probe = probe_lock();
+        // The detached counter is process-global: serialize the tests that
+        // assert on it so parallel descendant fixtures cannot interfere.
+        let dir = temp_db_dir();
+        // Descendant holds the pipes for ~2s, then exits: the abandoned
+        // readers must close and release their counter shortly after.
+        let path = write_script(
+            &dir,
+            "short-descendant",
+            "#!/bin/sh\necho \"short 1.0\"\nsleep 2 &\nexit 0\n",
+        );
+        let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
+        assert_eq!(verified.version, "short 1.0");
+        assert!(
+            active_detached_readers() > 0,
+            "readers detached while the descendant lives"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while active_detached_readers() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            active_detached_readers(),
+            0,
+            "abandoned readers must close once the descendant exits"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_probes_do_not_accumulate_detached_readers() {
+        let _probe = probe_lock();
+        let dir = temp_db_dir();
+        // Every probe leaves a descendant holding the pipes for a short
+        // while; probes keep coming. The bound keeps accumulation finite
+        // and readers release as descendants exit.
+        let path = write_script(
+            &dir,
+            "desc-loop",
+            "#!/bin/sh\necho \"desc-loop 1.0\"\nsleep 1; echo late >> /tmp/desc-loop-trace\n",
+        );
+        for _i in 0..4 {
+            let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
+            assert_eq!(verified.version, "desc-loop 1.0");
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while active_detached_readers() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(
+            active_detached_readers(),
+            0,
+            "no reader may outlive its descendant by more than the drain window"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_output_retains_at_most_the_cap() {
+        use std::io::Write;
+        // read_into_shared retains MAX_OUTPUT_BYTES and drains the rest
+        // (covered end-to-end by the flood test); this pins the retained
+        // size directly.
+        let mut flooding = Vec::new();
+        flooding
+            .write_all(&vec![b'A'; (MAX_OUTPUT_BYTES * 2) as usize])
+            .expect("write");
+        let shared = SharedOutput::default();
+        read_into_shared(flooding.as_slice(), &shared, Stream::Stdout);
+        let (stdout, _stderr) = shared.snapshot();
+        assert_eq!(stdout.len() as u64, MAX_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn repeated_verifications_are_independent_and_clean() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         let path = write_script(&dir, "steady-cli", "#!/bin/sh\necho \"steady 2.0\"\n");
         for _ in 0..5 {
@@ -428,6 +683,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verification_never_passes_shell_metacharacters_to_a_shell() {
+        let _probe = probe_lock();
         // The path is used directly by process APIs (no shell). A file
         // whose name contains metacharacters must still be executed as a
         // literal path — proving there is no injection surface.

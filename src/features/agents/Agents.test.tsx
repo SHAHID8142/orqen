@@ -246,10 +246,44 @@ describe("Agents surface — settings failures (Main Agent UX)", () => {
     });
     expect(screen.getByRole("alert")).toHaveTextContent("db unavailable");
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    // The Retry control must be enabled and actionable even while the
+    // preference radios stay disabled (regression: it used to render
+    // inside the disabled fieldset).
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+
     await waitFor(() => {
-      expect(screen.getByLabelText(/^None /)).toBeEnabled();
+      const group = screen.getByRole("group", { name: "Preferred Main Agent" });
+      expect(within(group).getByLabelText(/^None /)).toBeEnabled();
     });
+    // Full flow: failed load -> Retry -> successful load -> selection works.
+    fireEvent.click(within(screen.getByRole("group", { name: "Preferred Main Agent" })).getByLabelText("Claude Code"));
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("group", { name: "Preferred Main Agent" })).getByLabelText(
+          "Claude Code",
+        ),
+      ).toBeChecked();
+    });
+    expect(settingsIpc.setMainAgent).toHaveBeenCalledWith("claude-code");
+  });
+
+  it("keeps the Retry control outside the disabled fieldset", async () => {
+    const settingsIpc = makeSettingsIpc();
+    settingsIpc.load.mockRejectedValueOnce({ kind: "storage", message: "db unavailable" });
+    const { agentsStore, settingsStore } = renderAgents(makeAgentsIpc(), settingsIpc);
+    void agentsStore.load();
+    void settingsStore.load(); // the settings failure under test
+
+    await waitFor(() => {
+      expect(screen.getByTestId("main-agent-error")).toBeInTheDocument();
+    });
+    const fieldset = screen.getByRole("group", { name: "Preferred Main Agent" });
+    expect(fieldset).toBeDisabled();
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    expect(retry.closest("fieldset")).toBeNull();
   });
 
   it("shows a save failure and preserves the previous preference", async () => {

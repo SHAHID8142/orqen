@@ -25,6 +25,10 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 uuid = { version = "1.29", features = ["v4"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
+# Process-group termination for CLI verification probes (unix).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1

@@ -197,6 +197,27 @@ function Agents() {
         ))}
       </div>
 
+      {/* Settings failure recovery lives OUTSIDE the disabled fieldset —
+          a Retry control must stay usable exactly when the preferences are
+          unavailable. */}
+      {settingsError && (
+        <div
+          className="error-card"
+          role="alert"
+          data-testid="main-agent-error"
+          aria-live="polite"
+        >
+          <h2>Could not load preferences</h2>
+          <p>
+            {settings.loadError?.message ??
+              "Settings are unavailable. Your preference is untouched."}
+          </p>
+          <button type="button" onClick={() => void settingsStore.load()}>
+            Retry
+          </button>
+        </div>
+      )}
+
       <fieldset
         className="settings-group"
         disabled={!settingsReady || settings.saving}
@@ -207,17 +228,6 @@ function Agents() {
           <p className="option-note" data-testid="main-agent-loading">
             Loading preferences…
           </p>
-        )}
-        {settingsError && (
-          <div role="alert" data-testid="main-agent-error">
-            <p className="field-error">
-              {settings.loadError?.message ??
-                "Settings are unavailable. Your preference is untouched."}
-            </p>
-            <button type="button" onClick={() => void settingsStore.load()}>
-              Retry
-            </button>
-          </div>
         )}
         {settings.actionError && (
           <p className="field-error" role="alert" data-testid="main-agent-action-error">
