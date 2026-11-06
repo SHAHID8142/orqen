@@ -57,7 +57,7 @@ Rust modules (`src-tauri/src/`):
 | `commands/settings.rs` | Persistent settings load/update |
 | `error.rs` | `CommandError` — the single error contract (`invalid_input` / `storage`) |
 | `db/` | SQLite ownership: connection strategy, transactional migrations, `DbState` |
-| `agents/` | Agent registry: static definitions, CLI discovery, controlled verification (Phase 3) |
+| `agents/` | Agent registry: definitions, discovery, controlled verification, diagnostic execution adapters + run registry (Phase 3) |
 | future: adapters | Execution/runtime management (later Phase 3 features) |
 
 Dependency rule: **no circular dependencies** — `commands` may use `db` and `error`; nothing depends on `commands`. Frontend mirrors it: features depend on `lib`, never the reverse.
@@ -94,7 +94,8 @@ Task/chunk records (Phase 7) will require: id, project FK (cascade), title/descr
    - **Responsiveness:** `verify_agent` and `discover_agent` are async commands delegating to `spawn_blocking` workers — slow or hung probes never block the Tauri main thread or the async executor. The probe deadline covers the whole lifecycle; descendants holding inherited pipes get a 1 s grace period before the result is decided.
    - **Tree cleanup (unix):** the probe runs as its own process group (`process_group(0)`); on timeout, cleanup, or app-shutdown paths the whole group is signalled with SIGKILL — descendants cannot outlive the probe by holding inherited pipes. A hard app kill during an active probe can still orphan the (≤10 s) child on any platform.
    - **ENFORCED reader admission limit:** at most 64 output-reader threads may exist (two per probe). Both slots are reserved atomically before a probe spawns; an exhausted pool rejects the probe with a structured resource-busy error (no child is started). Slots return through RAII exactly when the owning reader thread terminates — including readers kept blocked by descendants that inherited the pipes, so the bound holds regardless of descendant lifetime. (Windows: direct-child kill only — descendants may hold slots longer; the enforced bound and the busy rejection apply identically.)
-   - Agent execution (future) will re-visit this boundary with an explicit trust decision per adapter.
+   - **Diagnostic execution (Phase 3 Feature 002):** a second process type — the controlled diagnostic run — spawns a discovered CLI with **adapter-built, compile-time-tested arguments** (Codex: `exec --sandbox read-only --skip-git-repo-check <fixed prompt>`; Claude Code: `-p <fixed prompt> --disallowedTools <mutating tools>`), an **isolated working directory** (`<app-data>/diagnostic-runs/<run-id>/`, removed after the run), a 120 s deadline, whole-tree cancellation, and bounded output. The prompt is a compile-time constant; no user text reaches the process arguments. Authentication is the CLI's own (never read, copied, or logged by Orqen). Runs are session-scoped in memory — nothing persisted.
+   - Agent execution beyond the diagnostic (conversational modes, coding tasks, orchestration) is a future feature with its own explicit trust decision per adapter.
 
 Least-privilege posture (Phase 0): capabilities contain `core:default` only; CSP is set in `tauri.conf.json`; the `opener` plugin was deliberately removed (see [DECISIONS.md](DECISIONS.md) D-004/D-005).
 

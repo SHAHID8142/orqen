@@ -37,6 +37,23 @@ Only observed results are recorded here — every entry lists the actual command
 
 Test-type transparency: Rust unit tests use **controlled fixture executables** (temp-dir shell scripts) for discovery and verification — no real third-party CLI is invoked in automated tests. The real Claude Code 2.1.316 evidence above comes from running the documented `--version` probe against the actually installed binary on this machine. Interactive GUI walkthrough of the Agents screen remains a manual checklist item.
 
+## Phase 3 · Feature 002 verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` | PASS — exit 0; **114/114 tests** |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust tests | `cargo test` | PASS — **75/75** (71 lib incl. 5 adapter-contract tests + runner, 4 integration) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` | PASS — schema v2, data intact, 0 error lines |
+| 7 | Real-provider acceptance: Claude Code | `claude -p "<diagnostic prompt>" --disallowedTools "Bash,Edit,Write,NotebookEdit"` against the installed 2.1.316 | **FAILED — environment, not adapter.** The CLI exits 0 but emits `[claude-code:unrecognized_model]` (SDK-level) and warns about the user's `CLAUDE_CODE_AUTO_COMPACT_WINDOW` configuration. The run output is surfaced truthfully by the diagnostic UI; no output is simulated. |
+| 8 | Real-provider acceptance: Codex | `command -v codex` | ABSENT — not installed on this machine; the adapter is fixture-tested but real-CLI-unverified. |
+| 9 | No unintended file modifications | runner runs in the isolated directory; sentinel checks | PASS — the runner's cwd is the app-managed isolated directory; no project paths reachable |
+| 10 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
+Test-type transparency: adapter-contract tests use compile-time invocation builders; execution-runner tests use **controlled fixture executables** (temp-dir shell scripts); the real-provider attempt above was performed **manually via bash** against the installed CLI (not in automated tests).
+
 ## Phase 3 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |

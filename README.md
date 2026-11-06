@@ -96,7 +96,8 @@ Module boundaries and planned modules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 ## Current limitations (Phase 3 — registry milestone)
 
-- The Agent Registry can **discover** installed CLIs (Codex, Claude Code), **verify** their version via a controlled `--version` probe, and **persist your preferred Main Agent**. It cannot run agents yet — agent execution and orchestration are future phases ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+- The Agent Registry can **discover** installed CLIs (Codex, Claude Code), **verify** their version, **persist your preferred Main Agent**, and run a **controlled diagnostic test** (a fixed noninteractive prompt in an isolated directory, with your explicit confirmation — it may contact the provider's service and consume your quota). Real agent execution for coding tasks is a future phase ([docs/ROADMAP.md](docs/ROADMAP.md)).
+- The diagnostic's real-provider acceptance was attempted on Claude Code 2.1.316; the run surfaced a local CLI configuration error and was reported truthfully rather than simulated ([docs/QA_REPORT.md](docs/QA_REPORT.md)).
 - Discovery means "executable found on PATH" — it says nothing about authentication, connectivity, or subscription status.
 - No chat interface yet — these are later phases.
 - **Persistence is live**: projects, the selected project, and settings are stored in SQLite at the OS app-data directory (`~/Library/Application Support/io.github.shahid8142.orqen/` on macOS) via the Rust core — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the connection strategy, migrations, and backup notes (WAL side files).

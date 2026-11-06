@@ -6,7 +6,14 @@ import { createContext, useContext, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { createAgentsStore, type AgentsStore } from "./store";
 import type { AgentsState } from "./store";
-import { discoverAgentRequest, fetchAgents, verifyAgentRequest } from "../ipc/agents";
+import {
+  discoverAgentRequest,
+  fetchAgents,
+  getDiagnosticRun,
+  startDiagnosticRun,
+  cancelDiagnosticRun,
+  verifyAgentRequest,
+} from "../ipc/agents";
 
 const AgentsContext = createContext<AgentsStore | null>(null);
 
@@ -16,6 +23,9 @@ export function createAppAgentsStore(): AgentsStore {
     load: fetchAgents,
     discover: discoverAgentRequest,
     verify: verifyAgentRequest,
+    startRun: startDiagnosticRun,
+    runStatus: getDiagnosticRun,
+    cancelRun: cancelDiagnosticRun,
   });
 }
 

@@ -26,17 +26,21 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("could not resolve the data directory: {e}"))?;
-            let state = DbState::new(data_dir);
+            let state = DbState::new(data_dir.clone());
             if let Err(message) = state.ensure_connection() {
                 eprintln!("database initialization failed: {message}");
             }
             app.manage(state);
+            app.manage(crate::agents::runner::RunRegistry::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::agents::list_agents,
             commands::agents::discover_agent,
             commands::agents::verify_agent,
+            commands::agents::start_diagnostic_run,
+            commands::agents::get_diagnostic_run,
+            commands::agents::cancel_diagnostic_run,
             commands::app_info::get_app_info,
             commands::app_info::echo_ping,
             commands::workspace::load_workspace,

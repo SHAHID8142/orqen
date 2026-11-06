@@ -7,8 +7,10 @@
 use serde::Serialize;
 
 /// What a supported agent can currently do inside Orqen versus what is
-/// planned. `execution`/`orchestration` are `false` until a future
-/// feature implements them — the UI relies on this distinction.
+/// planned. `execution` is `true` for the Phase 3 diagnostic test run
+/// (a fixed, noninteractive prompt in an isolated directory — not
+/// autonomous coding); `orchestration` stays `false` until a future
+/// feature implements it. The UI relies on this distinction.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCapabilities {
@@ -44,7 +46,7 @@ pub const CODEX: AgentDefinition = AgentDefinition {
     capabilities: AgentCapabilities {
         discovery: true,
         verification: true,
-        execution: false,
+        execution: true,
         orchestration: false,
     },
 };
@@ -59,7 +61,7 @@ pub const CLAUDE_CODE: AgentDefinition = AgentDefinition {
     capabilities: AgentCapabilities {
         discovery: true,
         verification: true,
-        execution: false,
+        execution: true,
         orchestration: false,
     },
 };
@@ -88,14 +90,17 @@ mod tests {
     }
 
     #[test]
-    fn all_definitions_are_cli_adapters_with_discovery_and_verification_only() {
+    fn all_definitions_are_cli_adapters_with_diagnostic_execution() {
         for definition in AGENT_DEFINITIONS {
             assert_eq!(definition.adapter, "cli");
             assert!(definition.capabilities.discovery);
             assert!(definition.capabilities.verification);
+            // Phase 3 Feature 002: diagnostic execution is implemented
+            // (a fixed noninteractive prompt in an isolated directory).
+            assert!(definition.capabilities.execution);
             assert!(
-                !definition.capabilities.execution && !definition.capabilities.orchestration,
-                "execution/orchestration must stay false until a future feature implements them"
+                !definition.capabilities.orchestration,
+                "orchestration must stay false until a future feature implements it"
             );
             assert!(!definition.executable_name.is_empty());
         }

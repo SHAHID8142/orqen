@@ -10,6 +10,7 @@ use crate::agents::definitions::{AGENT_DEFINITIONS, find_definition};
 use crate::agents::{discovery, verify};
 use crate::error::{CommandError, CommandResult};
 use serde::Serialize;
+use tauri::Manager;
 
 /// Capability metadata mirrored to the frontend.
 #[derive(Debug, Serialize)]
@@ -110,6 +111,60 @@ pub fn list_agents() -> CommandResult<Vec<AgentStatusDto>> {
     Ok(AGENT_DEFINITIONS.iter().map(definition_to_status).collect())
 }
 
+/// Starts a controlled diagnostic run for one agent. Returns the run id
+/// immediately; poll `get_diagnostic_run` for live status. The run
+/// executes a FIXED noninteractive prompt in an isolated directory and
+/// never touches user project files.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn start_diagnostic_run(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::agents::runner::RunRegistry>,
+    agent_id: String,
+) -> CommandResult<String> {
+    let definition = definition_for_id(&agent_id)?;
+    if !crate::agents::execution::find_adapter(definition.id)
+        .map(|a| a.supports_safe_diagnostics())
+        .unwrap_or(false)
+    {
+        return Err(CommandError::InvalidInput(format!(
+            "\"{}\" cannot run a diagnostic safely with the documented \
+             invocation of this CLI version; execution stays disabled.",
+            definition.display_name
+        )));
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| CommandError::Storage(format!("could not resolve the data directory: {e}")))?;
+    registry
+        .start(definition, &data_dir)
+        .map_err(CommandError::Storage)
+}
+
+/// Live status of a diagnostic run (polled by the frontend).
+#[tauri::command]
+pub async fn get_diagnostic_run(
+    registry: tauri::State<'_, crate::agents::runner::RunRegistry>,
+    run_id: String,
+) -> CommandResult<crate::agents::runner::RunStatusDto> {
+    Ok(registry.status(&run_id).unwrap_or(
+        crate::agents::runner::RunStatusDto::Unknown,
+    ))
+}
+
+/// Cancels a running diagnostic: signals the process group (unix) and
+/// flags the worker, which terminates the probe tree.
+#[tauri::command]
+pub async fn cancel_diagnostic_run(
+    registry: tauri::State<'_, crate::agents::runner::RunRegistry>,
+    run_id: String,
+) -> CommandResult<()> {
+    registry
+        .cancel(&run_id)
+        .map_err(CommandError::Storage)
+}
+
 /// Locates the agent's executable on the search path. Never executes it.
 ///
 /// Async: the filesystem walk runs on a dedicated blocking worker so the
@@ -192,7 +247,9 @@ mod tests {
         assert_eq!(agents.len(), 2);
         assert!(matches!(agents[0].discovery, DiscoveryDto::NotChecked));
         assert!(agents[0].verification.is_none());
-        assert!(!agents[0].capabilities.execution);
+        // Phase 3 Feature 002: diagnostic execution is now implemented.
+        assert!(agents[0].capabilities.execution);
+        assert!(!agents[0].capabilities.orchestration);
     }
 
     #[test]

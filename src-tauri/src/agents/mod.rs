@@ -12,4 +12,6 @@
 
 pub mod definitions;
 pub mod discovery;
+pub mod execution;
+pub mod runner;
 pub mod verify;

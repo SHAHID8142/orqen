@@ -40,3 +40,25 @@ export interface AgentRecord {
   /** When the last discovery/verification probe ran, if any. */
   checkedAt: string | null;
 }
+
+/** Terminal outcome of a diagnostic run. */
+export type RunOutcome = "succeeded" | "failed" | "timed_out" | "cancelled";
+
+/** The recorded result of a finished diagnostic run. */
+export interface RunOutcomeDto {
+  agentId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  outcome: RunOutcome;
+  exitCode: number | null;
+  output: string;
+  error: string | null;
+}
+
+/** Live status of a diagnostic run (polled). */
+export type RunStatusDto =
+  | { phase: "starting"; agentId: string }
+  | { phase: "running"; agentId: string; startedAt: string }
+  | { phase: "finished"; result: RunOutcomeDto }
+  | { phase: "unknown" };

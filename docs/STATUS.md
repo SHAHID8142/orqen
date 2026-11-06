@@ -7,11 +7,11 @@ Single source of truth for "where is the project right now". Updated at every me
 | Field | Value |
 | --- | --- |
 | **Phase** | 3 — Agent Registry & Adapters |
-| **Feature** | 001 — Agent Registry, Local CLI Discovery & Main Agent Selection (final remediation complete) |
-| **Progress** | Feature delivered: registry for Codex + Claude Code, PATH-based cross-platform discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted in SQLite (migration v2, real Phase 2 DB upgraded on launch). **109 frontend + 70 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
+| **Feature** | 002 — Real Agent Execution Adapters & Controlled Test Runs |
+| **Progress** | Feature delivered: registry for Codex + Claude Code, PATH-based cross-platform discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted in SQLite (migration v2, real Phase 2 DB upgraded on launch). **114 frontend + 75 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
 | **Blockers** | **CI blocked externally** (see [QA_REPORT.md](QA_REPORT.md) CI verification) — external to the repository; rerun path documented there. |
-| **Next review checkpoint** | Manual review of Phase 3 Feature 001 (registry, discovery, Main Agent) incl. the resource-safety correction |
-| **Next feature (after approval)** | Per [ROADMAP.md](ROADMAP.md): remaining Phase 3 work — chat infrastructure groundwork (Phase 4) after agent adapters mature |
+| **Next review checkpoint** | Manual review of Phase 3 Feature 002 (execution adapters, diagnostic run) |
+| **Next feature (after approval)** | Per [ROADMAP.md](ROADMAP.md): Phase 4 — Chat Infrastructure & Modes |
 
 ## Phase 1 · Feature 001 progress detail
 
@@ -27,6 +27,18 @@ Single source of truth for "where is the project right now". Updated at every me
 | Responsive behavior | Done — CSS breakpoints at 900px/640px; narrow-mode sidebar logic tested |
 | Quality gates + launch | Done — see QA_REPORT.md Phase 1 section |
 | Documentation | Done — D-013; ARCHITECTURE/ROADMAP/README/QA_REPORT updated |
+
+## Phase 3 · Feature 002 progress detail
+
+| Micro-task | Status |
+| --- | --- |
+| Adapter contract + Codex/Claude Code adapters (documented noninteractive invocations) | Done — 5 Rust tests |
+| Controlled diagnostic run (isolated dir, fixed prompt, timeout, cancel, bounded output) | Done — runner tests + full-pool rejection sentinel test |
+| Run registry (in-memory, session-scoped; single active run enforced) | Done |
+| Tauri commands (start/get/cancel diagnostic run; async) | Done |
+| Frontend run state machine (idle → awaiting confirmation → starting → running → terminal) | Done — 5 store tests |
+| Agents UI "Agent Test Run" section (confirmation, running, result, cancel) | Done — component tests |
+| Real-provider verification | PARTIAL — Claude Code 2.1.316 present; the real run fails at the SDK level due to the user's local CLI configuration (`unrecognized_model`); Codex absent. Recorded truthfully; the UI surfaces exactly this failure output. |
 
 ## Phase 3 · Feature 001 progress detail
 
@@ -72,6 +84,7 @@ Single source of truth for "where is the project right now". Updated at every me
 - **2026-11-05** — Feature 001 review remediation: overlay sidebar focus management (always-mounted `hidden` sidebar with valid `aria-controls`, focus into sidebar on open, focus restored to toggle on Escape/backdrop/toggle), project delete-confirmation focus flow (Cancel focused on appear, Delete restored on cancel, surviving project or name input after delete), retry preference draft editing (free typing, commit on blur/Enter, Escape reverts, clamp on commit). 62 frontend tests passing; L-012/L-013 lessons recorded.
 - **2026-11-05** — Feature 001 final accessibility fix: narrow overlay is now a fully contained modal drawer (skip link + header + main `inert` while open, `role="dialog"`/`aria-modal`, in-drawer close button, effect-based focus restoration to the toggle). Real-browser keyboard verification found and fixed a Chromium wrap-around defect across `inert` regions (explicit boundary wrap added, overlay mode only). 70 frontend tests passing; L-014 recorded.
 - **2026-11-05** — Phase 2 · Feature 001 delivered: SQLite persistence via rusqlite (WAL, foreign keys, busy timeout), transactional migrations (v1), projects + selection + settings persisted across restarts, snapshot-convergent frontend stores with loading/error/retry states. D-014 recorded; 80 frontend + 33 Rust tests; real-launch restart probe verified (data preserved, no wipe).
+- **2026-11-06** — Phase 3 · Feature 002 delivered: execution adapters (Codex `exec --sandbox read-only`, Claude `-p` with denied mutating tools), controlled diagnostic run in an isolated directory (fixed prompt, 120s timeout, whole-tree cancel), run registry (session-scoped, single active run), Agents UI test-run section with confirmation + truthful result rendering. Real-provider acceptance: attempted against the installed Claude Code 2.1.316 — the run fails at the SDK level due to the user's local CLI configuration (recorded, not simulated); Codex absent.
 - **2026-11-06** — Phase 3 · Feature 001 final remediation: settings error/Retry moved outside the disabled preference fieldset (verified with real browser clicks + keyboard), CLI probes spawn in their own process group with whole-tree termination on timeout (no more orphaned pipe holders), reader abandonment bounded and counter-clean. 109 frontend + 70 Rust tests; L-020 recorded.
 - **2026-11-06** — Phase 3 · Feature 001 review remediation: verification moved off the Tauri main thread (async + spawn_blocking), end-to-end probe deadline with descendant-pipe grace period, Windows cmd.exe semantics scoped honestly, unix discovery requires the execute bit, Main Agent UX surfaces settings errors with retry and queues updates (no silent drops). 108 frontend + 67 Rust tests; L-018 recorded.
 - **2026-11-06** — Phase 3 · Feature 001 delivered: Agent Registry (Codex + Claude Code), PATH-based discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted via migration v2 — real Phase 2 database upgraded on launch with all data intact. D-016 recorded; 104 frontend + 64 Rust tests. Real-machine evidence: Claude Code 2.1.316 verified; Codex absent.

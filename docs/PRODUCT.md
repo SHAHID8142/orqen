@@ -35,6 +35,11 @@ Design principles:
 - Adapter interface so new providers/agents require no core changes. Adapters run agents as isolated, least-privilege processes.
 - Agent identity, credentials, and model selection are user-managed in Settings; credentials never enter the repository.
 
+### 3.3a Diagnostic execution [P3 IMPLEMENTED — registry slice]
+- A controlled diagnostic test run per installed agent: fixed noninteractive prompt, isolated working directory, explicit user confirmation, truthful result rendering (status, duration, exit code, output), cancellation, and timeout.
+- Authentication is the CLI's own; the run may contact the provider's service and consume the user's quota — communicated in the UI before confirmation.
+- This is the only executed agent interaction so far: no conversations, no coding tasks, no delegation.
+
 ### 3.4 Orchestration [PLANNED]
 - The user appoints a supported agent as **Main Orchestrator**. The orchestrator coordinates sub-agents under the shared rules in [GOVERNANCE.md §Main agent](GOVERNANCE.md).
 - Agent task assignment, structured proposals, discussion rounds, voting, verdict recording, and independent review — with the voting limits in [GOVERNANCE.md §Agent collaboration](GOVERNANCE.md).

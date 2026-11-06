@@ -244,12 +244,15 @@ describe("Agents surface — settings failures (Main Agent UX)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("main-agent-error")).toBeInTheDocument();
     });
-    expect(screen.getByRole("alert")).toHaveTextContent("db unavailable");
+    const mainAgentError = screen.getByTestId("main-agent-error");
+    expect(mainAgentError).toHaveTextContent("db unavailable");
 
     // The Retry control must be enabled and actionable even while the
     // preference radios stay disabled (regression: it used to render
     // inside the disabled fieldset).
-    const retry = screen.getByRole("button", { name: "Retry" });
+    const retry = within(mainAgentError).getByRole("button", {
+      name: "Retry",
+    });
     expect(retry).toBeEnabled();
     fireEvent.click(retry);
 
@@ -281,7 +284,10 @@ describe("Agents surface — settings failures (Main Agent UX)", () => {
     });
     const fieldset = screen.getByRole("group", { name: "Preferred Main Agent" });
     expect(fieldset).toBeDisabled();
-    const retry = screen.getByRole("button", { name: "Retry" });
+    const retry = within(screen.getByTestId("main-agent-error")).getByRole(
+      "button",
+      { name: "Retry" },
+    );
     expect(retry).toBeEnabled();
     expect(retry.closest("fieldset")).toBeNull();
   });

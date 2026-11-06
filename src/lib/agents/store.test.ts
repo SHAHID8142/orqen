@@ -29,11 +29,17 @@ function makeIpc(overrides: Partial<AgentsIpc> = {}): AgentsIpc & {
   load: ReturnType<typeof vi.fn>;
   discover: ReturnType<typeof vi.fn>;
   verify: ReturnType<typeof vi.fn>;
+  startRun: ReturnType<typeof vi.fn>;
+  runStatus: ReturnType<typeof vi.fn>;
+  cancelRun: ReturnType<typeof vi.fn>;
 } {
   return {
     load: vi.fn().mockResolvedValue([record(), record({ id: "claude-code", displayName: "Claude Code", provider: "Anthropic", executableName: "claude" })]),
     discover: vi.fn(),
     verify: vi.fn(),
+    startRun: vi.fn().mockResolvedValue("run-1"),
+    runStatus: vi.fn().mockResolvedValue({ phase: "finished", result: { agentId: "codex", startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:05Z", durationMs: 5000, outcome: "succeeded", exitCode: 0, output: "OK", error: null } }),
+    cancelRun: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as never;
 }
@@ -206,3 +212,124 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+
+describe("agents store — diagnostic test-run state machine", () => {
+  it("walks idle → awaiting_confirmation → starting → running → succeeded", async () => {
+    let resolveRunStatus!: (value: { phase: "finished"; result: { agentId: string; startedAt: string; finishedAt: string; durationMs: number; outcome: "succeeded"; exitCode: number; output: string; error: null } }) => void;
+    const ipc = makeIpc({
+      runStatus: vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveRunStatus = resolve;
+        }),
+      ),
+    });
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    expect(store.getState().run.phase).toBe("awaiting_confirmation");
+
+    const confirm = store.confirmTestRun();
+    await vi.waitFor(() => expect(store.getState().run.phase).toBe("running"));
+    expect(ipc.startRun).toHaveBeenCalledWith("codex");
+
+    resolveRunStatus({
+      phase: "finished",
+      result: {
+        agentId: "codex",
+        startedAt: "2026-01-01T00:00:00Z",
+        finishedAt: "2026-01-01T00:00:05Z",
+        durationMs: 5000,
+        outcome: "succeeded",
+        exitCode: 0,
+        output: "Agent available.",
+        error: null,
+      },
+    });
+    await confirm;
+    expect(store.getState().run.phase).toBe("succeeded");
+    expect(store.getState().run.result?.output).toBe("Agent available.");
+  });
+
+  it("rejects a second run while one is awaiting confirmation", async () => {
+    const ipc = makeIpc();
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    store.requestTestRun("claude-code"); // ignored: already awaiting
+    expect(store.getState().run.agentId).toBe("codex");
+    expect(ipc.startRun).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed run truthfully", async () => {
+    const ipc = makeIpc({
+      startRun: vi.fn().mockRejectedValue({ kind: "storage", message: "the executable could not be started" }),
+    });
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    await store.confirmTestRun();
+    expect(store.getState().run.phase).toBe("failed");
+    expect(store.getState().run.error?.message).toContain("could not be started");
+    expect(store.getState().run.result).toBeNull();
+  });
+
+  it("transitions to cancelled when the run is cancelled while running", async () => {
+    const ipc = makeIpc({
+      runStatus: vi.fn().mockImplementation(() => {
+        // First poll: running; after cancel: finished-cancelled.
+        return Promise.resolve(
+          cancelledFlag
+            ? {
+                phase: "finished",
+                result: {
+                  agentId: "codex",
+                  startedAt: "2026-01-01T00:00:00Z",
+                  finishedAt: "2026-01-01T00:00:03Z",
+                  durationMs: 3000,
+                  outcome: "cancelled",
+                  exitCode: null,
+                  output: "",
+                  error: "the run was cancelled.",
+                },
+              }
+            : {
+                phase: "running",
+                agentId: "codex",
+                startedAt: "2026-01-01T00:00:00Z",
+              },
+        );
+      }),
+    });
+    let cancelledFlag = false;
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    const confirm = store.confirmTestRun();
+    await vi.waitFor(() => expect(store.getState().run.phase).toBe("running"));
+
+    cancelledFlag = true;
+    await store.cancelRun();
+    expect(ipc.cancelRun).toHaveBeenCalledWith("run-1");
+    await confirm;
+    expect(store.getState().run.phase).toBe("cancelled");
+  });
+
+  it("dismisses a terminal run back to idle", async () => {
+    const ipc = makeIpc();
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    await store.confirmTestRun();
+    await vi.waitFor(() => expect(store.getState().run.phase).toBe("succeeded"));
+
+    store.dismissRun();
+    expect(store.getState().run.phase).toBe("idle");
+    expect(store.getState().run.result).toBeNull();
+  });
+})

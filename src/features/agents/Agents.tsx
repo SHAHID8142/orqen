@@ -1,6 +1,6 @@
 import { useAgents, useAgentsStore } from "../../lib/agents/AgentsContext";
 import { useSettings, useSettingsStore } from "../../lib/settings/SettingsContext";
-import type { AgentRecord } from "../../types/agents";
+import type { AgentRecord, RunOutcome } from "../../types/agents";
 import "./Agents.css";
 
 function StatusChip({ record, pending }: { record: AgentRecord; pending: boolean }) {
@@ -105,6 +105,189 @@ function AgentCard({
   );
 }
 
+function RunOutcomeLabel({ outcome }: { outcome: RunOutcome }) {
+  switch (outcome) {
+    case "succeeded":
+      return <span className="chip chip-ok">Succeeded</span>;
+    case "failed":
+      return <span className="chip chip-miss">Failed</span>;
+    case "timed_out":
+      return <span className="chip chip-miss">Timed out</span>;
+    case "cancelled":
+      return <span className="chip">Cancelled</span>;
+  }
+}
+
+function AgentTestRunSection() {
+  const agents = useAgents();
+  const agentsStore = useAgentsStore();
+  const settings = useSettings();
+  const settingsStore = useSettingsStore();
+  const run = agents.run;
+  const settingsReady = settings.phase === "ready";
+
+  // Eligible: registry-loaded, executable found, verified, not currently running.
+  const eligible = agents.records.filter(
+    (record) =>
+      record.discovery.status === "found" &&
+      record.verification?.status === "verified",
+  );
+  const preferred = settings.data.mainAgentId;
+
+  return (
+    <section className="test-run" aria-labelledby="test-run-heading">
+      <h2 id="test-run-heading">Agent Test Run</h2>
+      <div className="notice-card" role="note">
+        <p>
+          Runs a <strong>fixed diagnostic prompt</strong> in an isolated
+          temporary directory. This may contact the provider&apos;s service
+          and consume your existing account quota or credits. It never reads
+          or modifies project files, and it is not an authorization for
+          autonomous coding.
+        </p>
+      </div>
+
+      {settings.phase === "loading" && (
+        <p className="option-note">Loading preferences…</p>
+      )}
+      {settings.phase === "error" && (
+        <div className="error-card" role="alert">
+          <p>Preferences are unavailable — retry from the error message above.</p>
+        <button type="button" onClick={() => void settingsStore.load()}>
+          Retry
+        </button>
+        </div>
+      )}
+
+      {run.phase === "idle" && (
+        <div className="test-run-idle">
+          {eligible.length === 0 ? (
+            <p className="option-note">
+              No eligible agent yet — an agent becomes eligible after its
+              executable is found and its version is verified.
+            </p>
+          ) : (
+            <ul className="test-run-agents">
+              {eligible.map((record) => (
+                <li key={record.id}>
+                  <button
+                    type="button"
+                    disabled={!settingsReady || settings.saving}
+                    onClick={() => agentsStore.requestTestRun(record.id)}
+                  >
+                    Run test with {record.displayName}
+                    {preferred === record.id && (
+                      <span className="option-note"> — preferred Main Agent</span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {run.phase === "awaiting_confirmation" && (
+        <div
+          className="confirm-card"
+          role="group"
+          aria-label="Confirm diagnostic run"
+          data-testid="run-confirmation"
+        >
+          <h3>Confirm diagnostic run</h3>
+          <p>
+            Agent:{" "}
+            <strong>
+              {agents.records.find((r) => r.id === run.agentId)?.displayName ??
+                run.agentId}
+            </strong>{" "}
+            — this will contact the provider&apos;s service and may consume
+            your account quota or credits.
+          </p>
+          <div className="confirm-actions">
+            <button
+              type="button"
+              className="danger"
+              autoFocus
+              onClick={() => void agentsStore.confirmTestRun()}
+            >
+              Confirm & run
+            </button>
+            <button type="button" onClick={() => agentsStore.cancelRequest()}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(run.phase === "starting" || run.phase === "running") && (
+        <div className="running-card" aria-busy="true" data-testid="run-running">
+          <p>
+            {run.phase === "starting"
+              ? "Starting diagnostic run…"
+              : "Diagnostic running…"}{" "}
+            <span className="option-note">
+              The prompt is fixed and runs in an isolated directory.
+            </span>
+          </p>
+          <button type="button" onClick={() => void agentsStore.cancelRun()}>
+            Cancel run
+          </button>
+        </div>
+      )}
+
+      {(run.phase === "succeeded" ||
+        run.phase === "failed" ||
+        run.phase === "timed_out" ||
+        run.phase === "cancelled") && (
+        <div className="result-card" data-testid="run-result" role="status">
+          <h3>
+            Diagnostic result <RunOutcomeLabel outcome={run.phase} />
+          </h3>
+          {run.result && (
+            <dl className="agent-details">
+              <div className="agent-detail">
+                <dt>Agent</dt>
+                <dd>{run.result.agentId}</dd>
+              </div>
+              <div className="agent-detail">
+                <dt>Duration</dt>
+                <dd>{(run.result.durationMs / 1000).toFixed(1)}s</dd>
+              </div>
+              {run.result.exitCode !== null && (
+                <div className="agent-detail">
+                  <dt>Exit code</dt>
+                  <dd>{run.result.exitCode}</dd>
+                </div>
+              )}
+            </dl>
+          )}
+          {run.error && (
+            <p className="agent-error" role="alert">
+              {run.error.message}
+            </p>
+          )}
+          {run.result?.output && (
+            <>
+              <h4 className="output-heading">Agent output</h4>
+              <pre className="agent-output">{run.result.output}</pre>
+            </>
+          )}
+          <div className="confirm-actions">
+            <button type="button" onClick={() => agentsStore.dismissRun()}>
+              Dismiss
+            </button>
+          </div>
+          <p className="agent-note">
+            A successful diagnostic confirms availability only — it is not an
+            authorization for autonomous coding.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Agents() {
   const agents = useAgents();
   const agentsStore = useAgentsStore();
@@ -196,6 +379,8 @@ function Agents() {
           />
         ))}
       </div>
+
+      <AgentTestRunSection />
 
       {/* Settings failure recovery lives OUTSIDE the disabled fieldset —
           a Retry control must stay usable exactly when the preferences are
