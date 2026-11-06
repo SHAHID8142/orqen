@@ -8,9 +8,9 @@ Single source of truth for "where is the project right now". Updated at every me
 | --- | --- |
 | **Phase** | 3 — Agent Registry & Adapters |
 | **Feature** | 001 — Agent Registry, Local CLI Discovery & Main Agent Selection (final remediation complete) |
-| **Progress** | Feature delivered: registry for Codex + Claude Code, PATH-based cross-platform discovery, explicit user-initiated `--version` verification (no shell, timeout + kill, bounded output), Main Agent preference persisted in SQLite (migration v2, real Phase 2 DB upgraded on launch). **109 frontend + 70 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
+| **Progress** | Feature delivered: registry for Codex + Claude Code, PATH-based cross-platform discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted in SQLite (migration v2, real Phase 2 DB upgraded on launch). **109 frontend + 70 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
 | **Blockers** | **CI blocked externally** (see [QA_REPORT.md](QA_REPORT.md) CI verification) — external to the repository; rerun path documented there. |
-| **Next review checkpoint** | Manual review of Phase 2 Feature 001 (incl. the manual restart checklist in the final report) |
+| **Next review checkpoint** | Manual review of Phase 3 Feature 001 (registry, discovery, Main Agent) incl. the resource-safety correction |
 | **Next feature (after approval)** | Per [ROADMAP.md](ROADMAP.md): remaining Phase 3 work — chat infrastructure groundwork (Phase 4) after agent adapters mature |
 
 ## Phase 1 · Feature 001 progress detail
@@ -34,7 +34,7 @@ Single source of truth for "where is the project right now". Updated at every me
 | --- | --- |
 | Registry definitions (Codex, Claude Code; capability metadata) | Done — 3 Rust tests |
 | CLI discovery (PATH search, platform extensions, failure handling) | Done — 7 Rust tests |
-| Controlled CLI verification (no shell, `--version`, timeout + kill, bounded output) | Done — 7 Rust tests |
+| Controlled CLI verification (fixed `--version` argument, timeout + whole-tree kill, bounded output) | Done — 13 Rust tests |
 | Migration v2 (`settings.main_agent_id`) + persistence | Done — upgrade/rollback/restart tests incl. real v1→v2 integration |
 | Agents IPC (`list_agents`, `discover_agent`, `verify_agent`, `set_main_agent`) | Done — registry id validation at the boundary |
 | Frontend agents store + Main Agent preference in settings store | Done — 10 agents store tests |
@@ -74,5 +74,5 @@ Single source of truth for "where is the project right now". Updated at every me
 - **2026-11-05** — Phase 2 · Feature 001 delivered: SQLite persistence via rusqlite (WAL, foreign keys, busy timeout), transactional migrations (v1), projects + selection + settings persisted across restarts, snapshot-convergent frontend stores with loading/error/retry states. D-014 recorded; 80 frontend + 33 Rust tests; real-launch restart probe verified (data preserved, no wipe).
 - **2026-11-06** — Phase 3 · Feature 001 final remediation: settings error/Retry moved outside the disabled preference fieldset (verified with real browser clicks + keyboard), CLI probes spawn in their own process group with whole-tree termination on timeout (no more orphaned pipe holders), reader abandonment bounded and counter-clean. 109 frontend + 70 Rust tests; L-020 recorded.
 - **2026-11-06** — Phase 3 · Feature 001 review remediation: verification moved off the Tauri main thread (async + spawn_blocking), end-to-end probe deadline with descendant-pipe grace period, Windows cmd.exe semantics scoped honestly, unix discovery requires the execute bit, Main Agent UX surfaces settings errors with retry and queues updates (no silent drops). 108 frontend + 67 Rust tests; L-018 recorded.
-- **2026-11-06** — Phase 3 · Feature 001 delivered: Agent Registry (Codex + Claude Code), PATH-based discovery, explicit user-initiated `--version` verification (no shell, timeout + kill, bounded output), Main Agent preference persisted via migration v2 — real Phase 2 database upgraded on launch with all data intact. D-016 recorded; 104 frontend + 64 Rust tests. Real-machine evidence: Claude Code 2.1.316 verified; Codex absent.
+- **2026-11-06** — Phase 3 · Feature 001 delivered: Agent Registry (Codex + Claude Code), PATH-based discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted via migration v2 — real Phase 2 database upgraded on launch with all data intact. D-016 recorded; 104 frontend + 64 Rust tests. Real-machine evidence: Claude Code 2.1.316 verified; Codex absent.
 - **2026-11-06** — Phase 2 · Feature 001 review remediation: creation auto-selects atomically (D-015), serial mutation queue in the frontend store (no stale snapshots, queued-not-discarded requests), future schema versions rejected untouched, sanitized storage errors with local diagnostics; real integration test suite added (lifecycle + concurrent serialization). 83 frontend + 39 Rust tests; L-015/L-016 recorded.

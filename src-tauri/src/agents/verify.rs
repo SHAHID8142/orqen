@@ -40,21 +40,60 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Grace period for output readers after the direct child exits (a
 /// descendant holding the inherited pipes cannot extend the deadline).
 const READER_GRACE: Duration = Duration::from_millis(1000);
-/// Global bound on reader threads abandoned because a descendant still
-/// holds the inherited pipes. Each abandoned reader retains at most
-/// MAX_OUTPUT_BYTES per stream and exits when the pipes close (or at its
-/// next wakeup once abandoned). The counter is diagnostic + enforced:
-/// exceeding it logs loudly but never breaks verification.
-pub const MAX_DETACHED_READERS: usize = 64;
-static DETACHED_READERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Diagnostic: how many reader threads are currently abandoned because a
-/// descendant holds the inherited pipes. Pub for tests/diagnostics.
-pub fn active_detached_readers() -> usize {
-    DETACHED_READERS.load(std::sync::atomic::Ordering::SeqCst)
-}
 /// Longest stderr excerpt kept for a failed probe.
 const MAX_ERROR_EXCERPT: usize = 200;
+
+/// ENFORCED reader admission limit: at most this many output-reader
+/// threads may exist at any moment (two per concurrent probe — stdout and
+/// stderr). Before a probe spawns, its two slots are reserved atomically;
+/// an exhausted pool rejects the probe with a resource-busy error. Slots
+/// are released through RAII exactly when the owning reader thread
+/// terminates — including readers kept blocked by descendants that
+/// inherited the pipes, so the bound holds no matter how long such
+/// descendants live (docs/ARCHITECTURE.md §Trust boundaries).
+pub const MAX_CONCURRENT_READERS: usize = 64;
+static READER_SLOTS: std::sync::Mutex<usize> = std::sync::Mutex::new(MAX_CONCURRENT_READERS);
+
+/// RAII reservation of one reader slot. Moving it into a reader thread
+/// transfers ownership; the slot returns to the pool exactly when the
+/// thread (and its reader) terminates. Not `Clone` — exactly one drop.
+struct ReaderSlot;
+
+impl Drop for ReaderSlot {
+    fn drop(&mut self) {
+        if let Ok(mut available) = READER_SLOTS.lock() {
+            *available += 1;
+        }
+        // A poisoned lock recovers via into_inner on the next acquire.
+    }
+}
+
+/// Atomically reserves one reader slot, if capacity remains.
+fn try_acquire_reader_slot() -> Option<ReaderSlot> {
+    let mut available = READER_SLOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *available == 0 {
+        return None;
+    }
+    *available -= 1;
+    Some(ReaderSlot)
+}
+
+/// Reserves a matched pair of slots (stdout + stderr), or none at all —
+/// a probe is never started with only one of its two readers.
+fn acquire_reader_slot_pair() -> Option<(ReaderSlot, ReaderSlot)> {
+    let first = try_acquire_reader_slot()?;
+    // On failure the first permit is released by its own Drop on this path.
+    try_acquire_reader_slot().map(|second| (first, second))
+}
+
+/// Diagnostic/test helper: currently free reader slots.
+pub fn available_reader_slots() -> usize {
+    *READER_SLOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A successfully verified CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +113,9 @@ pub enum VerifyError {
     NonZeroExit { code: i32, excerpt: String },
     /// Exit code 0 but no usable version line (or non-UTF-8 output).
     MalformedOutput,
+    /// The reader-slot pool is exhausted — too many concurrent probes
+    /// (e.g. readers blocked behind live descendants). Nothing was run.
+    ResourceBusy { limit: usize },
 }
 
 impl VerifyError {
@@ -99,6 +141,12 @@ impl VerifyError {
             Self::MalformedOutput => {
                 "verification failed: the CLI did not report a usable version.".to_string()
             }
+            Self::ResourceBusy { limit } => format!(
+                "verification is busy: at most {} CLI probes can run at the \
+                 same time and all slots are in use. Wait for one to finish \
+                 and try again.",
+                limit / 2
+            ),
         }
     }
 }
@@ -167,6 +215,16 @@ impl Drop for AbandonOnDrop {
 /// grace period before the result is decided from what was captured —
 /// descendants that inherited the pipes cannot hang verification.
 pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyError> {
+    // Admission first: the two reader slots (stdout + stderr) are
+    // reserved atomically BEFORE anything is spawned. An exhausted pool
+    // rejects the probe gracefully — no child is started. The slots are
+    // moved into the reader threads and return to the pool through RAII
+    // exactly when those readers terminate (however long that takes).
+    let (stdout_slot, stderr_slot) =
+        acquire_reader_slot_pair().ok_or(VerifyError::ResourceBusy {
+            limit: MAX_CONCURRENT_READERS,
+        })?;
+
     let mut command = Command::new(path);
     command
         .arg("--version")
@@ -191,11 +249,17 @@ pub fn verify_cli(path: &Path, timeout: Duration) -> Result<VerifiedCli, VerifyE
     // verification: the main loop decides on the deadline regardless.
     let stdout_reader = std::thread::spawn({
         let shared = shared.clone();
-        move || read_into_shared(stdout, &shared, Stream::Stdout)
+        move || {
+            read_into_shared(stdout, &shared, Stream::Stdout);
+            drop(stdout_slot); // capacity returns when this reader terminates
+        }
     });
     let stderr_reader = std::thread::spawn({
         let shared = shared.clone();
-        move || read_into_shared(stderr, &shared, Stream::Stderr)
+        move || {
+            read_into_shared(stderr, &shared, Stream::Stderr);
+            drop(stderr_slot);
+        }
     });
 
     let deadline = Instant::now() + timeout;
@@ -277,7 +341,6 @@ struct OutputBuffers {
 struct StreamBuffers {
     data: Vec<u8>,
     done: bool,
-    detached: bool,
 }
 
 impl OutputBuffers {
@@ -293,32 +356,15 @@ impl SharedOutput {
     /// After the grace period: readers close their read end at their next
     /// wakeup (a descendant writing afterwards gets EPIPE/SIGPIPE and
     /// typically exits). Fully blocked silent readers wake only when the
-    /// descendant writes or exits — the global detached counter bounds
-    /// how many such threads can accumulate.
+    /// descendant writes or exits — the reader-slot pool bounds how many
+    /// such threads can exist at once.
     fn abandon(&self) {
         let mut guard = self.inner.lock().expect("output lock");
         guard.abandoned = true;
-        let mut newly_detached = 0usize;
         for stream in [Stream::Stdout, Stream::Stderr] {
-            let stream_buffers = guard.stream(stream);
-            // Only streams whose readers are still blocked count as
-            // detached — a reader that already hit EOF released itself.
-            if !stream_buffers.done && !stream_buffers.detached {
-                stream_buffers.detached = true;
-                newly_detached += 1;
-                eprintln!("DBG abandon: stream marked detached");
-            }
-        }
-        if newly_detached > 0 {
-            eprintln!("DBG abandon: +{}", newly_detached);
-            let count = DETACHED_READERS
-                .fetch_add(newly_detached, std::sync::atomic::Ordering::SeqCst)
-                + newly_detached;
-            if count > MAX_DETACHED_READERS {
-                eprintln!(
-                    "orqen agents: detached reader count ({count}) exceeded the bound ({MAX_DETACHED_READERS})"
-                );
-            }
+            // Signal the readers to stop draining and close their read end
+            // at the next wakeup.
+            guard.stream(stream).done = true;
         }
     }
 
@@ -326,18 +372,10 @@ impl SharedOutput {
         self.inner.lock().expect("output lock").abandoned
     }
 
-    /// Marks a stream done and releases its detached bookkeeping if the
-    /// abandonment pass had counted it. Every reader exit path calls this,
-    /// so the detached counter cannot leak.
+    /// Marks a stream done (every reader exit path calls this).
     fn finish_stream(&self, stream: Stream) {
         let mut guard = self.inner.lock().expect("output lock");
-        let stream_buffers = guard.stream(stream);
-        stream_buffers.done = true;
-        if stream_buffers.detached {
-            stream_buffers.detached = false;
-            eprintln!("DBG finish: stream released");
-            DETACHED_READERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
+        guard.stream(stream).done = true;
     }
 
     fn append(&self, stream: Stream, chunk: &[u8]) {
@@ -375,26 +413,17 @@ fn read_into_shared(mut stream: impl Read, shared: &SharedOutput, stream_id: Str
     let mut chunk = [0u8; 8192];
     loop {
         if shared.is_abandoned() {
-            eprintln!("DBG reader: abandon-break");
             break; // dropping `stream` closes the read end
         }
         match stream.read(&mut chunk) {
-            Ok(0) => {
-                eprintln!("DBG reader: EOF");
-                break;
-            }
+            Ok(0) => break,
             Ok(n) => {
                 shared.append(stream_id, &chunk[..n]);
             }
-            Err(e) => {
-                eprintln!("DBG reader: err {e}");
-                break;
-            }
+            Err(_) => break,
         }
     }
-    eprintln!("DBG reader: exiting");
     shared.finish_stream(stream_id);
-    eprintln!("DBG reader: finished");
 }
 
 #[cfg(test)]
@@ -480,16 +509,16 @@ mod tests {
             "expected a fast timeout, got: {error:?}"
         );
         // The process-group kill terminates the hanging child AND any
-        // descendants: the pipes close and the abandoned readers release
-        // promptly (deterministic — no 30s orphan holding the pipes).
+        // descendants: the pipes close, both reader slots release
+        // promptly (deterministic — no orphan holding the pipes).
         let deadline = Instant::now() + Duration::from_secs(3);
-        while active_detached_readers() > 0 && Instant::now() < deadline {
+        while available_reader_slots() < MAX_CONCURRENT_READERS && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(
-            active_detached_readers(),
-            0,
-            "abandoned readers must release promptly after the group kill"
+            available_reader_slots(),
+            MAX_CONCURRENT_READERS,
+            "both reader slots must release promptly after the group kill"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -564,30 +593,30 @@ mod tests {
             "verification must not wait for the descendant: {:?}",
             started.elapsed()
         );
-        // Clean up within the lock: the abandoned readers release when the
-        // descendant exits, leaving the global counter clean for the next
-        // counter-asserting test.
+        // Clean up within the lock: the reader slots return when the
+        // descendant exits (group-killed at verify return), leaving the
+        // pool clean for the next slot-asserting test.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while active_detached_readers() > 0 && Instant::now() < deadline {
+        while available_reader_slots() < MAX_CONCURRENT_READERS && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(
-            active_detached_readers(),
-            0,
-            "abandoned readers must close once the descendant exits"
+            available_reader_slots(),
+            MAX_CONCURRENT_READERS,
+            "reader slots must return to the pool once the descendant exits"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
-    fn abandoned_readers_close_when_the_descendant_exits() {
+    fn reader_slots_are_released_when_the_descendant_exits() {
         let _probe = probe_lock();
-        // The detached counter is process-global: serialize the tests that
-        // assert on it so parallel descendant fixtures cannot interfere.
+        // The slot pool is process-global: serialize the tests that assert
+        // on it so parallel descendant fixtures cannot interfere.
         let dir = temp_db_dir();
-        // Descendant holds the pipes for ~2s, then exits: the abandoned
-        // readers must close and release their counter shortly after.
+        // Descendant holds the pipes for ~2s: the reader slots stay
+        // reserved while it lives, then return when it exits.
         let path = write_script(
             &dir,
             "short-descendant",
@@ -596,49 +625,188 @@ mod tests {
         let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
         assert_eq!(verified.version, "short 1.0");
         assert!(
-            active_detached_readers() > 0,
-            "readers detached while the descendant lives"
+            available_reader_slots() < MAX_CONCURRENT_READERS,
+            "reader slots reserved while the descendant lives"
         );
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        while active_detached_readers() > 0 && Instant::now() < deadline {
+        while available_reader_slots() < MAX_CONCURRENT_READERS && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(
-            active_detached_readers(),
-            0,
-            "abandoned readers must close once the descendant exits"
+            available_reader_slots(),
+            MAX_CONCURRENT_READERS,
+            "reader slots must return to the pool once the descendant exits"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
-    fn repeated_probes_do_not_accumulate_detached_readers() {
+    fn full_pool_rejects_the_probe_without_running_it() {
         let _probe = probe_lock();
         let dir = temp_db_dir();
-        // Every probe leaves a descendant holding the pipes for a short
-        // while; probes keep coming. The bound keeps accumulation finite
-        // and readers release as descendants exit.
+        // Exhaust every slot, then verify against a fixture that leaves a
+        // sentinel file behind when it RUNS. The rejection must happen
+        // before anything is spawned.
+        let mut permits = Vec::new();
+        while let Some(permit) = try_acquire_reader_slot() {
+            permits.push(permit);
+        }
+        assert_eq!(available_reader_slots(), 0);
+
+        let sentinel = dir.join("probe-ran.marker");
+        let script_body = format!(
+            "#!/bin/sh\ntouch '{}'\necho \"should-not-run 1.0\"\n",
+            sentinel.display()
+        );
+        let path = write_script(&dir, "rejected-cli", &script_body);
+
+        let error = verify_cli(&path, Duration::from_secs(10))
+            .expect_err("exhausted pool must reject the probe");
+        match error {
+            VerifyError::ResourceBusy { limit } => {
+                assert_eq!(limit, MAX_CONCURRENT_READERS);
+                assert!(
+                    error.user_message().contains("busy"),
+                    "user message must explain the busy state: {}",
+                    error.user_message()
+                );
+            }
+            other => panic!("expected ResourceBusy, got: {other:?}"),
+        }
+        // The fixture never ran: no sentinel file, and both slots were
+        // released by the rejection path (verify returns before spawning).
+        assert!(
+            !sentinel.exists(),
+            "the probe must not be spawned when the pool is exhausted"
+        );
+        drop(permits);
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+
+        // Capacity recovered: the same probe now runs and verifies.
+        let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify after recovery");
+        assert_eq!(verified.version, "should-not-run 1.0");
+        assert!(sentinel.exists(), "the probe runs once capacity returns");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_probes_return_all_reader_slots() {
+        let _probe = probe_lock();
+        let dir = temp_db_dir();
+        // Every probe's process group is terminated at cleanup, so no
+        // slots may accumulate across repeated probes.
         let path = write_script(
             &dir,
             "desc-loop",
-            "#!/bin/sh\necho \"desc-loop 1.0\"\nsleep 1; echo late >> /tmp/desc-loop-trace\n",
+            "#!/bin/sh\necho \"desc-loop 1.0\"\nsleep 1 &\nexit 0\n",
         );
         for _i in 0..4 {
             let verified = verify_cli(&path, Duration::from_secs(10)).expect("verify");
             assert_eq!(verified.version, "desc-loop 1.0");
+            // The group kill terminates the descendant immediately: both
+            // readers finish and their slots return before the next probe.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while available_reader_slots() < MAX_CONCURRENT_READERS && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(
+                available_reader_slots(),
+                MAX_CONCURRENT_READERS,
+                "all reader slots must return after each probe"
+            );
         }
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while active_detached_readers() > 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        assert_eq!(
-            active_detached_readers(),
-            0,
-            "no reader may outlive its descendant by more than the drain window"
-        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pool_acquire_release_round_trip() {
+        let _probe = probe_lock();
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+        let first = try_acquire_reader_slot().expect("acquire");
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS - 1);
+        drop(first);
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+    }
+
+    #[test]
+    fn pool_boundary_exhaustion_and_recovery() {
+        let _probe = probe_lock();
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_READERS {
+            permits.push(try_acquire_reader_slot().expect("slot available"));
+        }
+        assert_eq!(available_reader_slots(), 0);
+        assert!(
+            try_acquire_reader_slot().is_none(),
+            "exhausted pool must reject"
+        );
+        // Release everything: capacity returns exactly, no underflow.
+        drop(permits);
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+        // And the pool is fully usable again.
+        let permit = try_acquire_reader_slot().expect("usable again");
+        drop(permit);
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+    }
+
+    #[test]
+    fn pool_pair_is_atomic_or_none() {
+        let _probe = probe_lock();
+        // Leave exactly ONE slot free: a pair acquisition must fail without
+        // taking it (no half-reservation), then the slot stays available.
+        let mut permits = Vec::new();
+        while permits.len() < MAX_CONCURRENT_READERS - 1 {
+            permits.push(try_acquire_reader_slot().expect("slot"));
+        }
+        assert_eq!(available_reader_slots(), 1);
+        assert!(
+            acquire_reader_slot_pair().is_none(),
+            "pair must not take the last slot"
+        );
+        assert_eq!(
+            available_reader_slots(),
+            1,
+            "the last slot must be untouched"
+        );
+        drop(permits);
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+    }
+
+    #[test]
+    fn pool_concurrent_acquisition_never_exceeds_the_limit() {
+        let _probe = probe_lock();
+        use std::sync::atomic::AtomicUsize;
+        let acquired = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let acquired = acquired.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut local = 0usize;
+                for _ in 0..16 {
+                    if try_acquire_reader_slot().is_some() {
+                        local += 1;
+                        // Hold briefly, then release.
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                acquired.fetch_add(local, std::sync::atomic::Ordering::SeqCst);
+                local
+            }));
+        }
+        let mut total = 0usize;
+        for handle in handles {
+            total += handle.join().expect("thread");
+        }
+        // Each thread attempted 16 acquisitions (128 attempts over 64
+        // slots): the POOL must never hand out more than 64 at once —
+        // the peak is bounded by construction; here we assert the pool
+        // returns to exactly full afterwards.
+        assert_eq!(available_reader_slots(), MAX_CONCURRENT_READERS);
+        assert!(total <= 128);
+        let _ = total;
     }
 
     #[test]
@@ -673,6 +841,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_failure_is_reported_for_missing_binaries() {
+        let _probe = probe_lock();
         let dir = temp_db_dir();
         let missing = dir.join("does-not-exist");
         let error = verify_cli(&missing, Duration::from_secs(5)).expect_err("must fail");

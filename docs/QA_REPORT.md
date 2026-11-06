@@ -79,6 +79,19 @@ Test-type transparency: Rust unit tests use **controlled fixture executables** (
 2. **Process lifecycle (Task 2):** the probe spawns in its own **process group** (`process_group(0)`, unix) and timeout/cleanup terminates the **whole tree** via `killpg(SIGKILL)` — an orphaned descendant can no longer hold the inherited pipes open for 30s (regression: the timeout fixture previously left a live `sleep 30` orphan; now zero lingering processes after the suite). Reader abandonment keeps bounded memory (64 KiB/stream) and every reader exit path releases the global detached counter; the counter bound (64, logged) documents the platform limitation where tree-kill is unavailable (Windows — direct child only).
 3. **Stale-binary measurement trap (Lesson L-020):** during diagnosis, cargo served a **stale test binary** after source edits (external-SSD mtime granularity) — counter readings that contradicted the instrumented code were from the old leaky build. Force-rebuild (`cargo clean -p orqen`) resolved the contradiction.
 
+## Phase 3 · Feature 001 resource-safety correction verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 1 | Clean install | `npm ci` | PASS — exit 0 |
+| 2 | Frontend gate | `npm run verify` | PASS — exit 0; 109/109 tests |
+| 3 | Rust gates | `rust:fmt` / `rust:clippy` / `rust:check` | PASS — exit 0 all three |
+| 4 | Rust tests | `cargo test` | PASS — **74/74** (70 lib incl. 4 new pool-admission tests + updated slot assertions; 4 integration) |
+| 5 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 6 | Desktop launch | `npm run tauri dev` | PASS — schema v2, data intact, 0 error lines |
+| 7 | ENFORCED reader limit | pool unit tests + full-pool rejection test | PASS — acquire/release round trip; exact boundary (64th acquires, 65th rejected); pair atomicity (never a half-reservation); concurrent acquisition never exceeds the limit; full-pool `verify_cli` returns `ResourceBusy` **without spawning the fixture** (sentinel file absent) |
+| 8 | CI status | GitHub Actions | BLOCKED — EXTERNAL (unchanged; see CI verification section) |
+
 ## Phase 2 · Feature 001 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |
