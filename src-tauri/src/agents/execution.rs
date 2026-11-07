@@ -15,8 +15,12 @@
 //! - Authentication always comes from the CLI's own configuration; no
 //!   credentials are read, stored, or logged.
 
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The fixed diagnostic prompt. Deliberately not configurable: this
@@ -180,40 +184,291 @@ pub fn codex_diagnostic_run_policy(work_dir: &Path) -> CodexRunPolicy {
 /// Hard timeout for one preflight probe (the sandbox harness normally
 /// completes in well under a second).
 const PREFLIGHT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounded retained output PER STREAM for one probe; the remainder is
+/// drained and discarded so the pipe cannot deadlock and memory stays
+/// bounded (probe outputs are tiny by design).
+const MAX_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
+/// Grace for readers after the probe tree is terminated, bounded by the
+/// remaining probe deadline.
+const PROBE_READER_GRACE: Duration = Duration::from_millis(500);
 
-/// Runs a command to completion with a hard timeout, returning its exit
-/// code and combined output. A timed-out child is killed (fail closed).
-/// Probes produce tiny output, so reading the pipes after exit cannot
-/// deadlock.
-fn run_probe(mut command: Command, timeout: Duration) -> Result<(Option<i32>, String), String> {
-    use std::io::Read;
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("could not start the sandbox probe: {e}"))?;
+/// Structured failure of one sandbox probe. Every variant fails closed.
+#[derive(Debug)]
+pub enum ProbeError {
+    /// The enforced reader-slot pool is exhausted — no probe was started.
+    ReaderSlotsExhausted,
+    /// The probe exceeded its end-to-end deadline; the process group was
+    /// terminated and the child reaped.
+    TimedOut,
+    /// The probe process could not be spawned.
+    Spawn(String),
+    /// Process polling failed.
+    Poll(String),
+}
+
+impl ProbeError {
+    /// Accurate, user-presentable reason for the fail-closed decision.
+    fn message(&self) -> String {
+        match self {
+            ProbeError::ReaderSlotsExhausted => {
+                "the local resource limit for output readers is exhausted — \
+                 try again shortly."
+                    .to_string()
+            }
+            ProbeError::TimedOut => format!(
+                "the sandbox probe timed out after {}s and its process \
+                 group was terminated",
+                PREFLIGHT_PROBE_TIMEOUT.as_secs()
+            ),
+            ProbeError::Spawn(detail) => format!("could not start the sandbox probe: {detail}"),
+            ProbeError::Poll(detail) => {
+                format!("could not track the sandbox probe process: {detail}")
+            }
+        }
+    }
+}
+
+/// The bounded result of one completed probe.
+#[derive(Debug)]
+pub struct ProbeOutcome {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Default)]
+struct ProbeStream {
+    data: Vec<u8>,
+    done: bool,
+}
+
+#[derive(Default)]
+struct ProbeBuffers {
+    streams: [ProbeStream; 2],
+    abandoned: bool,
+}
+
+impl ProbeBuffers {
+    fn append(&mut self, stream: usize, chunk: &[u8]) {
+        let slot = &mut self.streams[match stream {
+            0 => 0,
+            _ => 1,
+        }];
+        let remaining = MAX_PROBE_OUTPUT_BYTES.saturating_sub(slot.data.len());
+        if remaining > 0 {
+            let end = chunk.len().min(remaining);
+            slot.data.extend_from_slice(&chunk[..end]);
+        }
+    }
+
+    fn mark_done(&mut self, stream: usize) {
+        self.streams[match stream {
+            0 => 0,
+            _ => 1,
+        }]
+        .done = true;
+    }
+
+    fn all_done(&self) -> bool {
+        self.streams.iter().all(|s| s.done)
+    }
+}
+
+/// Marks the probe buffers abandoned on every exit path (success,
+/// failure, timeout, panic): blocked readers stop at their next wakeup,
+/// so no reader thread can outlive the probe indefinitely.
+struct ProbeDrainGuard {
+    buffers: Arc<Mutex<ProbeBuffers>>,
+}
+
+impl Drop for ProbeDrainGuard {
+    fn drop(&mut self) {
+        if let Ok(mut buffers) = self.buffers.lock() {
+            buffers.abandoned = true;
+        }
+    }
+}
+
+/// RAII owner of the probe's direct child: on ANY drop that has not
+/// already reaped, the whole process group (unix) is terminated and the
+/// child reaped — no zombie, no orphaned descendants.
+struct ProbeChild {
+    child: Option<std::process::Child>,
+}
+
+impl ProbeChild {
+    /// Terminates the probe tree (group SIGKILL on unix — descendants
+    /// holding the pipes die with it), then reaps the direct child.
+    /// Idempotent: a None child is a completed reap.
+    fn terminate_and_reap(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            #[cfg(unix)]
+            {
+                let pid = child.id();
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            self.child = None;
+        }
+    }
+}
+
+impl Drop for ProbeChild {
+    fn drop(&mut self) {
+        self.terminate_and_reap();
+    }
+}
+
+/// Runs a command to completion under an END-TO-END deadline that covers
+/// spawn, execution, output collection, cleanup, and direct-child
+/// reaping (D-024 hardening).
+///
+/// Safety mechanics (reusing the verified Phase 3 patterns):
+/// - the probe runs in its own process group (unix) and the WHOLE group
+///   is terminated on timeout, after exit (descendants holding the
+///   pipes die with it), and on every error/panic path via RAII;
+/// - stdout/stderr are drained CONCURRENTLY by two bounded reader
+///   threads (a full pipe cannot deadlock the child; retained memory is
+///   bounded per stream); the readers hold enforced reader-slot
+///   reservations and release them exactly when they terminate;
+/// - after the direct child exits, readers get a bounded grace period
+///   (clamped by the remaining deadline) and are then abandoned — a
+///   descendant that inherited a pipe cannot extend the probe beyond
+///   the deadline by more than the grace window.
+///
+/// A nonzero exit is a SUCCESSFUL probe (the caller decides semantics).
+fn run_probe(mut command: Command, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // The deadline starts before the spawn: it covers the whole
+    // lifecycle.
     let deadline = Instant::now() + timeout;
-    loop {
+
+    let (stdout_slot, stderr_slot) = match super::verify::acquire_reader_slot_pair() {
+        Some(pair) => pair,
+        None => return Err(ProbeError::ReaderSlotsExhausted),
+    };
+
+    let mut guarded_child = ProbeChild {
+        child: Some(
+            command
+                .spawn()
+                .map_err(|e| ProbeError::Spawn(e.to_string()))?,
+        ),
+    };
+    // Spawn failed: the slots were never moved into readers — dropping
+    // them here returns the capacity.
+
+    let buffers = Arc::new(Mutex::new(ProbeBuffers::default()));
+    let drain_guard = ProbeDrainGuard {
+        buffers: buffers.clone(),
+    };
+
+    let stdout = guarded_child
+        .child
+        .as_mut()
+        .and_then(|child| child.stdout.take())
+        .expect("probe stdout was piped");
+    let stderr = guarded_child
+        .child
+        .as_mut()
+        .and_then(|child| child.stderr.take())
+        .expect("probe stderr was piped");
+    let stdout_reader = std::thread::spawn({
+        let buffers = buffers.clone();
+        move || {
+            drain_bounded(stdout, &buffers, 0);
+            drop(stdout_slot); // capacity returns exactly when this reader ends
+        }
+    });
+    let stderr_reader = std::thread::spawn({
+        let buffers = buffers.clone();
+        move || {
+            drain_bounded(stderr, &buffers, 1);
+            drop(stderr_slot);
+        }
+    });
+
+    // Execution phase, under the deadline.
+    let exit_code = loop {
+        let Some(child) = guarded_child.child.as_mut() else {
+            unreachable!("the child is only taken after a completed reap");
+        };
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut combined = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_string(&mut combined);
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut combined);
-                }
-                return Ok((status.code(), combined));
+                // The direct child exited — terminate the whole group so
+                // descendants holding the pipes cannot outlive the probe,
+                // then reap (no zombie). RAII covers every other path.
+                guarded_child.terminate_and_reap();
+                break status.code();
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("the sandbox probe timed out".to_string());
+                    // Guard Drop terminates the group and reaps.
+                    return Err(ProbeError::TimedOut);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => return Err(format!("the sandbox probe failed: {e}")),
+            Err(e) => {
+                return Err(ProbeError::Poll(e.to_string()));
+            }
         }
+    };
+
+    // Reader grace: bounded, and clamped by the remaining deadline. A
+    // descendant that inherited a pipe cannot extend the probe beyond
+    // the deadline by more than this window.
+    let grace_end = deadline.min(Instant::now() + PROBE_READER_GRACE);
+    while Instant::now() < grace_end {
+        if buffers.lock().map(|b| b.all_done()).unwrap_or(true) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(drain_guard); // readers stop at their next wakeup
+    let _ = stdout_reader.join().ok();
+    let _ = stderr_reader.join().ok();
+
+    let guard = buffers.lock().expect("probe buffers lock");
+    let stdout_text = String::from_utf8_lossy(&guard.streams[0].data).to_string();
+    let stderr_text = String::from_utf8_lossy(&guard.streams[1].data).to_string();
+    drop(guard);
+    Ok(ProbeOutcome {
+        exit_code,
+        stdout: stdout_text,
+        stderr: stderr_text,
+    })
+}
+
+/// Drains a pipe to EOF, retaining at most MAX_PROBE_OUTPUT_BYTES;
+/// honors the abandon flag (set on every exit path) by stopping at the
+/// next wakeup.
+fn drain_bounded(mut stream: impl Read, buffers: &Mutex<ProbeBuffers>, stream_index: usize) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        if buffers.lock().map(|b| b.abandoned).unwrap_or(true) {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Ok(mut buffers) = buffers.lock() {
+                    buffers.append(stream_index, &chunk[..n]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Ok(mut buffers) = buffers.lock() {
+        buffers.mark_done(stream_index);
     }
 }
 
@@ -232,25 +487,35 @@ impl Drop for PreflightFixtures {
     }
 }
 
-/// Provider-free sandbox enforcement preflight (D-024): proves that the
-/// ACTUAL installed CLI at `executable` enforces the diagnostic
-/// confinement policy before a run is admitted. Runs the production
-/// policy builder through `codex sandbox` — the same policy engine
-/// `codex exec` uses — against harmless temporary fixtures; NO provider
-/// service is contacted.
+/// Provider-free sandbox enforcement preflight (D-024, semantics
+/// hardened): proves that the ACTUAL installed CLI at `executable`
+/// enforces the diagnostic confinement policy before a run is admitted.
+/// Runs the production policy builder through `codex sandbox` — the
+/// same policy engine `codex exec` uses — against harmless temporary
+/// fixtures; NO provider service is contacted.
 ///
-/// Probes, in order:
+/// Probes, in order — every denial is validated against a control so an
+/// unrelated failure can never be mistaken for enforcement, and
+/// ambiguous results fail closed:
 /// 1. positive control — the harness accepts the policy arguments and
-///    the permitted work-dir read succeeds (this is what distinguishes
-///    a real denial from "the command never ran");
-/// 2. a protected read OUTSIDE the granted roots is denied and its
-///    content never appears in the output;
-/// 3. a write outside the work dir is denied and creates nothing;
-/// 4. an invalid profile is a hard error (the fail-closed mechanism is
-///    alive, not silently ignored).
+///    the permitted work-dir read succeeds (distinguishes a real denial
+///    from "the command never ran");
+/// 2. unsandboxed control — the protected fixture IS readable without
+///    confinement (a denial of an unreadable file would be meaningless);
+/// 3. a protected read OUTSIDE the granted roots is denied with the OS
+///    access-denial signature, and the content never appears;
+/// 4. a permitted work-dir WRITE succeeds (write-denial control);
+/// 5. a write outside the work dir is denied with the OS signature and
+///    creates nothing;
+/// 6. an invalid profile fails with a CONFIGURATION error (the
+///    fail-closed mechanism is alive — not a missing command or a
+///    harness crash).
 ///
-/// Any violation, harness error, or timeout fails closed: the caller
-/// must refuse to start the diagnostic.
+/// Any violation, ambiguous result, harness error, or timeout fails
+/// closed: the caller must refuse to start the diagnostic. The preflight
+/// scope is FILESYSTEM confinement; tool-call network restriction is a
+/// property of the same profile verified by the sandbox test suite, not
+/// re-proven per run (see the restriction summary shown in the UI).
 pub fn codex_enforcement_preflight(executable: &Path) -> Result<(), String> {
     let fixtures = PreflightFixtures {
         work_dir: std::env::temp_dir().join(format!("orqen-preflight-{}", uuid::Uuid::new_v4())),
@@ -272,69 +537,141 @@ pub fn codex_enforcement_preflight(executable: &Path) -> Result<(), String> {
         .map_err(|e| format!("could not write the preflight fixture: {e}"))?;
 
     let policy = codex_diagnostic_run_policy(&fixtures.work_dir);
-    let sandbox_probe =
-        |overrides: &[String], args: &[&str]| -> Result<(Option<i32>, String), String> {
-            let mut command = Command::new(executable);
-            command.arg("sandbox");
-            for override_value in overrides {
-                command.arg("-c").arg(override_value);
-            }
-            command.arg("--").args(args).current_dir(&fixtures.work_dir);
-            run_probe(command, PREFLIGHT_PROBE_TIMEOUT)
-        };
+    let sandbox_probe = |overrides: &[String], args: &[&str]| -> Result<ProbeOutcome, String> {
+        let mut command = Command::new(executable);
+        command.arg("sandbox");
+        for override_value in overrides {
+            command.arg("-c").arg(override_value);
+        }
+        command.arg("--").args(args).current_dir(&fixtures.work_dir);
+        run_probe(command, PREFLIGHT_PROBE_TIMEOUT)
+            .map_err(|error| format!("preflight probe failed: {}", error.message()))
+    };
     let excerpt = |output: &str| -> String { output.trim().chars().take(200).collect() };
 
     // 1. Positive control: the harness runs with our policy arguments
     // and the permitted read succeeds.
-    let (code, output) = sandbox_probe(
+    let outcome = sandbox_probe(
         &policy.config_overrides,
         &["cat", "orqen-preflight-allowed.txt"],
     )?;
-    if code != Some(0) || !output.contains("orqen-preflight-ok") {
+    if outcome.exit_code != Some(0) || !outcome.stdout.contains("orqen-preflight-ok") {
         return Err(format!(
             "the installed CLI did not pass the sandbox enforcement \
              preflight: the permitted diagnostic read did not succeed ({})",
-            excerpt(&output)
+            excerpt(&outcome.stdout)
         ));
     }
 
-    // 2. A protected read outside the granted roots must be denied —
-    // the content must never appear.
+    // 2. Unsandboxed control: the protected fixture is genuinely
+    // readable without confinement — otherwise a denial below would be
+    // meaningless.
     let protected_arg = fixtures.protected.to_string_lossy().to_string();
-    let (code, output) = sandbox_probe(&policy.config_overrides, &["cat", &protected_arg])?;
-    if code == Some(0) || output.contains("orqen-preflight-protected-content") {
+    let mut unsandboxed = Command::new("cat");
+    unsandboxed
+        .arg(&protected_arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let unsandboxed = run_probe(unsandboxed, PREFLIGHT_PROBE_TIMEOUT).map_err(|error| {
+        format!(
+            "the preflight fixture could not be verified readable \
+             without confinement: {}",
+            error.message()
+        )
+    })?;
+    if unsandboxed.exit_code != Some(0)
+        || !unsandboxed
+            .stdout
+            .contains("orqen-preflight-protected-content")
+    {
+        return Err("the installed CLI did not pass the sandbox enforcement \
+             preflight: the protected fixture was not readable without \
+             confinement, so a denial could not be verified"
+            .to_string());
+    }
+
+    // 3. A protected read outside the granted roots must be denied with
+    // the OS access-denial signature; the content must never appear. A
+    // nonzero exit WITHOUT the signature is ambiguous (harness failure,
+    // missing command, crash) and fails closed.
+    let outcome = sandbox_probe(&policy.config_overrides, &["cat", &protected_arg])?;
+    let denial_output = format!("{}{}", outcome.stdout, outcome.stderr);
+    if outcome.exit_code == Some(0) || denial_output.contains("orqen-preflight-protected-content") {
         return Err(format!(
             "the installed CLI did not pass the sandbox enforcement \
              preflight: a protected file outside the diagnostic \
              directory was readable ({})",
-            excerpt(&output)
+            excerpt(&denial_output)
+        ));
+    }
+    if !denial_output.contains("Operation not permitted") {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: the protected-read denial is ambiguous — no OS \
+             access-denial signature ({})",
+            excerpt(&denial_output)
         ));
     }
 
-    // 3. A write outside the work dir must be denied and create nothing.
+    // 4. Write-denial control: a write INSIDE the work dir succeeds.
+    let outcome = sandbox_probe(
+        &policy.config_overrides,
+        &["touch", "orqen-preflight-inside.txt"],
+    )?;
+    if outcome.exit_code != Some(0) {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: the permitted diagnostic write did not succeed \
+             ({})",
+            excerpt(&outcome.stdout)
+        ));
+    }
+
+    // 5. A write outside the work dir must be denied with the OS
+    // signature and create nothing.
     let write_arg = fixtures.write_target.to_string_lossy().to_string();
-    let (code, output) = sandbox_probe(&policy.config_overrides, &["touch", &write_arg])?;
-    if code == Some(0) || fixtures.write_target.exists() {
+    let outcome = sandbox_probe(&policy.config_overrides, &["touch", &write_arg])?;
+    let denial_output = format!("{}{}", outcome.stdout, outcome.stderr);
+    if outcome.exit_code == Some(0) || fixtures.write_target.exists() {
         return Err(format!(
             "the installed CLI did not pass the sandbox enforcement \
              preflight: a file could be created outside the diagnostic \
              directory ({})",
-            excerpt(&output)
+            excerpt(&denial_output)
+        ));
+    }
+    if !denial_output.contains("Operation not permitted") {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: the outside-write denial is ambiguous — no OS \
+             access-denial signature ({})",
+            excerpt(&denial_output)
         ));
     }
 
-    // 4. An invalid profile must be a hard error — the fail-closed
-    // mechanism is alive (an update that silently IGNORED an unknown
-    // value would otherwise downgrade the policy without notice).
+    // 6. An invalid profile must fail with a CONFIGURATION error — not
+    // a missing command, a crash, or silence. An update that silently
+    // IGNORED an unknown value would otherwise downgrade the policy
+    // without notice.
     let mut broken_overrides = policy.config_overrides.clone();
     broken_overrides[0] = broken_overrides[0].replace("\"deny\"", "\"bogus-value\"");
-    let (code, output) = sandbox_probe(&broken_overrides, &["echo", "preflight-should-not-run"])?;
-    if code == Some(0) {
+    let outcome = sandbox_probe(&broken_overrides, &["echo", "preflight-should-not-run"])?;
+    if outcome.exit_code == Some(0) {
         return Err(format!(
             "the installed CLI did not pass the sandbox enforcement \
              preflight: an invalid permissions profile was accepted \
              instead of failing closed ({})",
-            excerpt(&output)
+            excerpt(&outcome.stdout)
+        ));
+    }
+    let combined = format!("{}{}", outcome.stdout, outcome.stderr);
+    if !combined.contains("Error") {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: the invalid-profile failure is ambiguous — no \
+             configuration error reported ({})",
+            excerpt(&combined)
         ));
     }
 
@@ -424,10 +761,12 @@ impl ExecutionAdapter for CodexAdapter {
         "Runs noninteractively with an app-owned per-run permissions \
          profile: filesystem reads and writes are denied outside the \
          diagnostic directory (platform/runtime paths stay readable; \
-         /tmp is explicitly denied), tool-call network access is \
-         restricted, the tool-call environment carries no arbitrary \
-         inherited variables, and your global Codex configuration is \
-         not loaded."
+         /tmp is explicitly denied), the tool-call environment carries \
+         no arbitrary inherited variables, and your global Codex \
+         configuration is not loaded. Before every run, a preflight \
+         re-verifies this filesystem confinement on your installed \
+         CLI; tool-call network access is restricted by the same \
+         profile and is verified by the app's sandbox test suite."
     }
 
     fn parse_result(
@@ -615,9 +954,301 @@ pub fn diagnostic_prompt() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     fn any_work_dir() -> std::path::PathBuf {
         std::env::temp_dir().join("orqen-adapter-test-workdir")
+    }
+
+    // ---- run_probe lifecycle regression tests (unix fixtures) ----
+    // These fixtures are the only processes the automated tests run —
+    // never a real provider CLI.
+
+    /// Serializes probe-heavy tests among themselves so the shared
+    /// reader-slot pool is not contended between sibling tests.
+    static PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Runs a probe, retrying while the reader-slot pool is busy with
+    /// sibling tests (the documented user-facing behavior on exhaustion).
+    fn run_probe_with_retry(
+        build: impl Fn() -> Command,
+        timeout: Duration,
+    ) -> Result<ProbeOutcome, ProbeError> {
+        let mut attempts = 0;
+        loop {
+            match run_probe(build(), timeout) {
+                Err(ProbeError::ReaderSlotsExhausted) if attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn probe_command(script: &Path, dir: &Path) -> Command {
+        let mut command = Command::new(script);
+        command.current_dir(dir);
+        command
+    }
+
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    fn probe_fixture_dir(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("orqen-probe-{label}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    /// True while the process with `pid` still exists.
+    fn process_alive(pid: u32) -> bool {
+        Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    /// Polls until the recorded descendant is gone (bounded).
+    fn assert_descendant_dead(pidfile: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(pid_text) = fs::read_to_string(pidfile)
+                && let Ok(pid) = pid_text.trim().parse::<u32>()
+                && !process_alive(pid)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the descendant must be terminated with the probe group"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_completes_normally() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("ok");
+        let script = write_script(&dir, "tool", "#!/bin/sh\necho probe-ok\n");
+        let outcome =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(15))
+                .expect("ok probe");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.stdout.contains("probe-ok"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_times_out_and_terminates_the_group() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("hang");
+        let script = write_script(&dir, "tool", "#!/bin/sh\nsleep 30\n");
+        let started = Instant::now();
+        let error =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_millis(800))
+                .expect_err("a hanging probe must time out");
+        assert!(matches!(error, ProbeError::TimedOut), "got: {error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the end-to-end deadline must cover cleanup, not just the poll loop"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_survives_a_descendant_holding_the_pipes() {
+        // The direct child exits successfully while a descendant keeps
+        // stdout open: the deadline must still hold (the pre-fix code
+        // blocked forever in post-exit read_to_string) and the
+        // descendant must not survive the probe.
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("descendant");
+        let script = write_script(
+            &dir,
+            "tool",
+            "#!/bin/sh\nsleep 30 &\necho $! > \"$1\"\necho probe-done\n",
+        );
+        let pidfile = dir.join("descendant.pid");
+        let script_with_arg = script.clone();
+        let pidfile_for_probe = pidfile.clone();
+        let started = Instant::now();
+        let outcome = run_probe_with_retry(
+            || {
+                let mut command = Command::new(&script_with_arg);
+                command.arg(&pidfile_for_probe).current_dir(&dir);
+                command
+            },
+            Duration::from_secs(10),
+        )
+        .expect("probe");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.stdout.contains("probe-done"));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a descendant holding the pipes must not extend the probe"
+        );
+        assert_descendant_dead(&pidfile);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_bounds_excessive_stdout() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("stdout-flood");
+        // 5 MiB on stdout — far beyond the retained bound; the pipe must
+        // be drained concurrently (no deadlock) and memory stays bounded.
+        let script = write_script(
+            &dir,
+            "tool",
+            "#!/bin/sh\necho final-line\nyes probe-spam | head -c 5000000\n",
+        );
+        let outcome =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(30))
+                .expect("probe");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(
+            outcome.stdout.contains("final-line"),
+            "the tail must be retained"
+        );
+        assert!(
+            outcome.stdout.len() <= MAX_PROBE_OUTPUT_BYTES,
+            "retained stdout must be bounded: {} bytes",
+            outcome.stdout.len()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_bounds_excessive_stderr() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("stderr-flood");
+        let script = write_script(
+            &dir,
+            "tool",
+            "#!/bin/sh\necho done\nyes err-spam | head -c 5000000 >&2\n",
+        );
+        let outcome =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(30))
+                .expect("probe");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(
+            outcome.stderr.len() <= MAX_PROBE_OUTPUT_BYTES,
+            "retained stderr must be bounded: {} bytes",
+            outcome.stderr.len()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_handles_both_streams_producing_concurrently() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("both-streams");
+        // Both pipes fill simultaneously — concurrent draining must
+        // prevent the classic write-side deadlock.
+        let script = write_script(
+            &dir,
+            "tool",
+            "#!/bin/sh\necho both-done\nyes out | head -c 2000000 &\nyes err | head -c 2000000 >&2 &\nwait\n",
+        );
+        let outcome =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(30))
+                .expect("probe");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.stdout.contains("both-done"));
+        assert!(outcome.stdout.len() <= MAX_PROBE_OUTPUT_BYTES);
+        assert!(outcome.stderr.len() <= MAX_PROBE_OUTPUT_BYTES);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_reports_nonzero_exit() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("nonzero");
+        let script = write_script(&dir, "tool", "#!/bin/sh\necho oops >&2\nexit 3\n");
+        let outcome =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(15))
+                .expect("probe ran");
+        assert_eq!(
+            outcome.exit_code,
+            Some(3),
+            "a nonzero exit is a completed probe"
+        );
+        assert!(outcome.stderr.contains("oops"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_probes_do_not_leak_resources() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = probe_fixture_dir("repeat");
+        let script = write_script(&dir, "tool", "#!/bin/sh\necho round\n");
+        for _ in 0..3 {
+            let outcome =
+                run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(15))
+                    .expect("probe");
+            assert_eq!(outcome.exit_code, Some(0));
+        }
+        // The reader-slot pool must be fully restored after the run.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while super::super::verify::available_reader_slots() < 64 {
+            assert!(Instant::now() < deadline, "reader slots must be recovered");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_fails_closed_when_reader_slots_are_exhausted() {
+        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Reserve the whole pool (pairs until none remain — the failing
+        // call releases its own first slot internally).
+        let mut held = Vec::new();
+        while let Some(pair) = super::super::verify::acquire_reader_slot_pair() {
+            held.push(pair);
+        }
+        assert!(!held.is_empty());
+
+        let dir = probe_fixture_dir("exhausted");
+        let script = write_script(&dir, "tool", "#!/bin/sh\necho never\n");
+        let error = run_probe(probe_command(&script, &dir), Duration::from_secs(15))
+            .expect_err("an exhausted pool must fail closed before any spawn");
+        assert!(
+            matches!(error, ProbeError::ReaderSlotsExhausted),
+            "got: {error:?}"
+        );
+
+        drop(held);
+        // Recovery: capacity returns and probes run again.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while super::super::verify::available_reader_slots() < 64 {
+            assert!(Instant::now() < deadline, "reader slots must recover");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let outcome =
+            run_probe_with_retry(|| probe_command(&script, &dir), Duration::from_secs(15))
+                .expect("recovered");
+        assert_eq!(outcome.exit_code, Some(0));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -21,6 +21,28 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 002 preflight safety & test-integrity fix verification (2026-11-07, local, macOS 27.2 arm64)
+
+**Scope:** two confirmed defects fixed — the preflight probe lifecycle (deadline did not cover output collection; unbounded blocking reads could hang forever on inherited pipes) and the network denial test (an accept-and-close listener made nonzero curl exits meaningless). All evidence below is sandbox-harness / controlled-fixture evidence; NO authenticated `codex exec` run was performed and no provider service was contacted.
+
+| # | Check | Method | Result |
+| --- | --- | --- | --- |
+| 1 | Frontend gates | `npm ci` → `npm run verify` | PASS — **118/118** |
+| 2 | Rust gates | `npm run rust:fmt` + `npm run rust:clippy` + `npm run rust:check` | PASS — fmt clean; clippy `-D warnings` 0 errors (both feature configs); check clean |
+| 3 | Rust tests | `cargo test` (plain) | PASS — **105 lib (incl. 9 new probe-lifecycle regressions) + 12 sandbox-enforcement (labeled skips without a CLI) + 9 execution-integration + 4 persistence** |
+| 4 | Timeout path | `cargo test --features test-timeouts` | PASS — +1 |
+| 5 | **Probe lifecycle** | 9 new unit tests with controlled shell fixtures | PASS — normal success; direct-child hang (end-to-end deadline holds, ~0.8 s timeout honored, group terminated); direct child exits while a descendant holds the pipes (probe completes within the deadline AND the descendant pid is verified dead afterward); 5 MiB stdout flood; 5 MiB stderr flood; both streams concurrently (no deadlock; ≤16 KiB retained per stream); nonzero exit reported as a completed probe; repeated probes (slots fully recovered); slot-pool exhaustion fails closed BEFORE spawn and recovers; no lingering descendants |
+| 6 | **Network test (rewritten)** | loopback HTTP server serving a valid 200 + sentinel body | PASS — positive control: the EXACT unsandboxed curl command exits 0 and receives `ORQEN-NET-SENTINEL-OK`; sandboxed curl on the same URL: nonzero, sentinel never received, `Failed to connect to 127.0.0.1` signature (connect denial on a provably-working endpoint — not a dead server, missing curl, invalid URL, or empty reply). Server is loopback-only, bounded-timeout, and shut down after both requests |
+| 7 | **Negative-probe semantics** | production preflight hardened | PASS — probe order: sandbox positive control → unsandboxed protected-read control (the fixture is proven readable WITHOUT confinement) → protected read denied with the `Operation not permitted` OS signature → permitted inside-write control → outside write denied with the OS signature and nothing created → invalid profile fails with a CONFIGURATION error text. Nonzero exits WITHOUT the required signature are ambiguous and fail closed with accurate messages; denial signatures are checked against stdout AND stderr |
+| 8 | Enforcement gate | `ORQEN_CODEX_BIN=<authorized cached codex-cli 0.164.0> ORQEN_REQUIRE_CODEX_ENFORCEMENT=1 cargo test --test codex_sandbox_enforcement` | PASS — **12/12 executed** (0 skipped); without the flag the same suite reports clearly labeled `[SKIPPED-LABELED]` skips; with the flag and a missing binary the suite FAILS (verified previously) |
+| 9 | UI accuracy | restriction summary narrowed | PASS — the per-run preflight is described as re-verifying FILESYSTEM confinement; tool-call network restriction is stated as profile behavior verified by the sandbox test suite (not re-proven per run) |
+| 10 | Preserved safeguards | regression suites | PASS — per-run profile, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `--strict-config`, no legacy `--sandbox`, macOS-only eligibility, version floor, ledger freshness, identity fingerprint, atomic admission, cancellation/tree cleanup, reader-slot limits, Claude Code disabled — all covered by the unchanged suites |
+| 11 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 12 | Desktop launch probe | `cargo build` + direct launch, observed 12 s | PASS (process level) — alive, 0 error lines |
+| 13 | CI status | GitHub Actions | BLOCKED — EXTERNAL (billing restriction, unchanged) |
+
+**Real-provider status: NOT RUN (unchanged).** No authenticated Codex prompt was executed and none is claimed.
+
 ## Phase 3 · Feature 002 final acceptance hardening verification (2026-11-07, local, macOS 27.2 arm64)
 
 **Scope precision:** all evidence below is SANDBOX-HARNESS evidence (`codex sandbox`, the same policy engine `codex exec` uses, provider-free) plus the per-run production preflight. NO `codex exec` diagnostic was executed and no provider service was contacted by any automated test; end-to-end `codex exec` enforcement still awaits one user-authorized real-provider run. No new Codex package was downloaded or installed.

@@ -24,6 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use orqen_lib::agents::execution::{
     CODEX_MINIMUM_VERSION, codex_diagnostic_run_policy, version_meets_minimum,
@@ -103,6 +104,22 @@ fn run_under_policy(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let output = cmd.output().expect("spawn codex sandbox");
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.code(), text)
+}
+
+/// Runs a command WITHOUT any sandbox (the positive-control path),
+/// returning (exit_code, combined output).
+fn run_unsandboxed(command_args: &[&str], work_dir: &Path) -> (Option<i32>, String) {
+    let output = Command::new(command_args[0])
+        .args(&command_args[1..])
+        .current_dir(work_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn unsandboxed control command");
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     (output.status.code(), text)
@@ -432,41 +449,84 @@ fn nested_escalation_is_denied() {
 
 #[test]
 fn network_access_from_tool_commands_is_denied() {
-    // The adapter claims "tool-call network access is restricted" — this
-    // test must exist before that claim is stated as verified. Positive
-    // control first: the listener IS reachable from an unsandboxed
-    // connection, so a sandboxed failure is meaningful.
+    // A nonzero sandboxed curl alone proves NOTHING (a dead server,
+    // a missing curl, or an invalid URL fail the same way). This test
+    // therefore serves a REAL HTTP response from a loopback server and
+    // first runs the EXACT unsandboxed curl command as a positive
+    // control — exit 0 with the sentinel body. The sandboxed denial is
+    // then evidenced by the curl connect-failure signature on the SAME
+    // URL that provably works unsandboxed.
     let Some(codex) = codex_binary() else {
         eprintln!(
             "[SKIPPED-LABELED] codex enforcement test: no supported CLI (set ORQEN_CODEX_BIN)"
         );
         return;
     };
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind local listener");
+
+    // Loopback-only HTTP server: one valid response per connection,
+    // bounded connection handling, shut down when the listener drops.
+    const SENTINEL: &[u8] = b"ORQEN-NET-SENTINEL-OK";
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
     let port = listener.local_addr().expect("local addr").port();
-    std::thread::spawn(move || {
-        // Accept (and immediately close) connections in the background.
-        for stream in listener.incoming() {
-            drop(stream);
+    let server = std::thread::spawn(move || {
+        use std::io::Write;
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+            let mut request = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                SENTINEL.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(SENTINEL);
+            // stream drop closes the connection
         }
+        // `listener` moved here: it drops when incoming() ends (after the
+        // test releases it), ending this thread — no leak.
     });
-    use std::net::TcpStream;
-    TcpStream::connect(("127.0.0.1", port)).expect("positive control: listener reachable");
 
     let work_dir = temp_dir("deny-network");
     let policy = codex_diagnostic_run_policy(&work_dir);
     let url = format!("http://127.0.0.1:{port}/");
 
+    // Positive control: the EXACT command, unsandboxed.
+    let (code, output) = run_unsandboxed(&["curl", "-m", "5", "-sS", &url], &work_dir);
+    assert_eq!(
+        code,
+        Some(0),
+        "positive control failed — the test environment (curl/server) is broken, \
+         NOT the sandbox: {output}"
+    );
+    assert!(
+        output.contains("ORQEN-NET-SENTINEL-OK"),
+        "positive control must receive the sentinel body: {output}"
+    );
+
+    // The same request inside the Codex sandbox.
     let (code, output) = run_under_policy(
         &codex,
         &work_dir,
         &policy.config_overrides,
-        &["curl", "-m", "5", "-s", &url],
+        &["curl", "-m", "5", "-sS", &url],
     );
     assert_ne!(code, Some(0), "the sandboxed request must fail: {output}");
-    // The URL content cannot appear (the listener sends nothing, but a
-    // connect success would show in curl's exit code, asserted above).
+    assert!(
+        !output.contains("ORQEN-NET-SENTINEL-OK"),
+        "the sentinel body must never be received through the sandbox: {output}"
+    );
+    assert!(
+        output.contains("Failed to connect to 127.0.0.1"),
+        "the failure must be the connect-denial signature on a URL that \
+         provably works unsandboxed — not an invalid URL, missing curl, \
+         empty reply, or generic harness failure: {output}"
+    );
+
     let _ = std::fs::remove_dir_all(&work_dir);
+    // Release the listener: incoming() ends, the server thread exits.
+    drop(server);
 }
 
 #[test]
