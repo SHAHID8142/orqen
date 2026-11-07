@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use orqen_lib::agents::definitions::{AgentCapabilities, AgentDefinition};
+use orqen_lib::agents::eligibility::ExecutableIdentity;
 use orqen_lib::agents::runner::{RunOutcome, RunRegistry, RunStatusDto, TEST_DEADLINE_OVERRIDE};
 
 static FIXTURE_CODEX: AgentDefinition = AgentDefinition {
@@ -89,9 +90,13 @@ fn hung_run_hits_the_deadline_and_is_terminated() {
         .expect("chmod fixture");
     let _path = PathGuard::fixture_first(&dir.join("bin"));
 
+    let identity = ExecutableIdentity::observe(&bin.join("orqen-fixture-codex"))
+        .expect("observe fixture identity");
     let registry = RunRegistry::default();
     let started = Instant::now();
-    let run_id = registry.start(&FIXTURE_CODEX, &dir).expect("start");
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &identity)
+        .expect("start");
 
     let deadline = started + Duration::from_secs(15);
     let result = loop {

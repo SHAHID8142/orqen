@@ -32,6 +32,7 @@ pub fn run() {
             }
             app.manage(state);
             app.manage(crate::agents::runner::RunRegistry::default());
+            app.manage(crate::agents::eligibility::EligibilityLedger::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -22,9 +22,15 @@
 //! Process safety (reuses the Phase 3 verification patterns):
 //! - output readers drain bounded shared buffers;
 //! - the deadline covers the whole lifecycle and a cancellation flag is
-//!   honored between polls;
-//! - the probe re-verifies the CLI (backend-side, time-bounded) before
-//!   executing — frontend "Verified" status is UX, not a guarantee.
+//!   honored between polls (and before the process is ever spawned);
+//! - execution eligibility is backend-authoritative: a fresh
+//!   backend-side verification is required (`agents::eligibility`) and
+//!   the executable's observed identity (path, size, mtime, unix inode)
+//!   is re-checked immediately before spawning — frontend "Verified"
+//!   status is UX, not authorization;
+//! - on EVERY exit path — normal exit included — the process group is
+//!   terminated (unix), so a successful parent cannot leave orphaned
+//!   descendants holding the pipes or the working directory.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -41,6 +47,7 @@ use serde::Serialize;
 
 use super::definitions::AgentDefinition;
 use super::discovery;
+use super::eligibility::ExecutableIdentity;
 use super::execution::find_adapter;
 
 /// Hard deadline for one diagnostic run (model latency can be tens of
@@ -324,6 +331,7 @@ impl RunRegistry {
         &self,
         definition: &'static AgentDefinition,
         data_dir: &Path,
+        verified_identity: &ExecutableIdentity,
     ) -> Result<String, String> {
         self.inner
             .active
@@ -366,12 +374,15 @@ impl RunRegistry {
         let inner = self.inner.clone();
         let worker_run_id = run_id.clone();
         let worker_data_dir = data_dir.to_path_buf();
+        let expected_identity = verified_identity.clone();
         // The guard moves into the closure and owns the run's admission
-        // from here on: `record_finished` releases the slot on success,
+        // from here on: the recorded result releases the slot on success,
         // `disarm` retires the guard, and a panic unwinds through the
         // guard's Drop — which releases admission and removes the entry.
         // If the spawn itself fails, the closure (and the guard inside)
-        // is dropped: same RAII release, no phantom entry.
+        // is dropped: same RAII release, no phantom entry. The terminal
+        // result is recorded EXACTLY ONCE, here — `execute_diagnostic`
+        // only constructs it.
         std::thread::Builder::new()
             .name(format!("diagnostic-{worker_run_id}"))
             .spawn(move || {
@@ -380,6 +391,7 @@ impl RunRegistry {
                     &worker_data_dir,
                     &worker_run_id,
                     &cancel,
+                    &expected_identity,
                     &inner,
                 );
                 inner.record_finished(&worker_run_id, outcome);
@@ -438,18 +450,21 @@ fn execute_diagnostic(
     data_dir: &Path,
     run_id: &str,
     cancel: &Arc<AtomicBool>,
+    verified_identity: &ExecutableIdentity,
     inner: &Arc<RegistryInner>,
 ) -> RunOutcomeDto {
     let started_at = now_rfc3339();
     let started = Instant::now();
 
-    // Records the outcome and returns the DTO (single construction point).
+    // Single construction point for the outcome. Recording happens ONCE
+    // in the worker closure (`start`) — never here — so a terminal result
+    // can never be written twice.
     let finish = |outcome: RunOutcome,
                   exit_code: Option<i32>,
                   output: String,
                   error: Option<String>|
      -> RunOutcomeDto {
-        let dto = RunOutcomeDto {
+        RunOutcomeDto {
             agent_id: definition.id.to_string(),
             started_at: started_at.clone(),
             duration_ms: started.elapsed().as_millis() as u64,
@@ -458,12 +473,16 @@ fn execute_diagnostic(
             output: output.clone(),
             error: error.clone(),
             finished_at: now_rfc3339(),
-        };
-        inner.record_finished(run_id, dto.clone());
-        dto
+        }
     };
 
-    // Adapter + eligibility.
+    // The adapter provides the argument construction. Whether the
+    // adapter may run diagnostics AT ALL (`supports_safe_diagnostics`)
+    // is enforced at the IPC boundary —
+    // `commands::agents::ensure_diagnostic_admissible`, the only caller
+    // of `start` — together with the fresh-verification ledger gate.
+    // The runner enforces what it alone can observe: that the spawned
+    // executable is the verified one (identity check below).
     let adapter = match find_adapter(definition.id) {
         Some(adapter) => adapter,
         None => {
@@ -478,16 +497,11 @@ fn execute_diagnostic(
             );
         }
     };
-    if !adapter.supports_safe_diagnostics() {
-        return finish(
-            RunOutcome::Failed,
-            None,
-            String::new(),
-            Some(adapter.unsafe_diagnostics_reason().to_string()),
-        );
-    }
 
-    // Discovery: the executable must have been located.
+    // Discovery: the executable must have been located, and it must be
+    // the SAME executable that was verified — identity is re-checked here
+    // (in the executor, not just the command layer) so a swap between
+    // verification and spawn is detected.
     let executable = match discovery::discover(definition) {
         discovery::DiscoveryOutcome::Found { path } => path,
         discovery::DiscoveryOutcome::NotFound => {
@@ -505,6 +519,31 @@ fn execute_diagnostic(
             return finish(RunOutcome::Failed, None, String::new(), Some(message));
         }
     };
+    if executable != verified_identity.path {
+        return finish(
+            RunOutcome::Failed,
+            None,
+            String::new(),
+            Some(
+                "the executable that was found is not the one that was \
+                 verified — verify the agent again before running a \
+                 diagnostic."
+                    .to_string(),
+            ),
+        );
+    }
+    if !verified_identity.matches_current(&executable) {
+        return finish(
+            RunOutcome::Failed,
+            None,
+            String::new(),
+            Some(
+                "the executable changed since it was verified — verify the \
+                 agent again before running a diagnostic."
+                    .to_string(),
+            ),
+        );
+    }
 
     // Isolated working directory: application-managed, no user project
     // data. Removed only after the process tree is terminated.
@@ -537,6 +576,21 @@ fn execute_diagnostic(
             );
         }
     };
+
+    // Cancellation honored BEFORE the process exists: a cancel request
+    // that arrived during discovery/dir setup never spawns a process at
+    // all.
+    if cancel.load(Ordering::SeqCst) {
+        drop(stdout_slot);
+        drop(stderr_slot);
+        let _ = std::fs::remove_dir_all(&work_dir);
+        return finish(
+            RunOutcome::Cancelled,
+            None,
+            String::new(),
+            Some("the run was cancelled before the process started.".to_string()),
+        );
+    }
 
     // Spawn: adapter-owned arguments, explicit working directory, own
     // process group (unix) for whole-tree cancellation.
@@ -637,14 +691,20 @@ fn execute_diagnostic(
         }
     };
 
-    if timed_out || cancelled {
-        // Terminate the whole tree; the readers drain what remains.
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-        let _ = child.kill();
+    // Terminate the whole tree on EVERY exit path — a normal parent exit
+    // can leave descendants alive as orphans in the same process group,
+    // holding the inherited pipes and the working directory. On unix the
+    // group was created by this spawn and the direct child has just been
+    // observed to exit (or was already signalled); the group-kill window
+    // is immediately after that observation, so the PID/group-reuse risk
+    // is the same accepted residual risk as D-018 (documented in
+    // docs/ARCHITECTURE.md). Windows has no group API: direct-child kill
+    // only — a documented limitation.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
     }
+    let _ = child.kill(); // direct child (windows path; unix: belt & braces)
 
     // Short grace for the readers after the tree is signalled, then the
     // DrainGuard stops them (bounded buffers).
@@ -771,15 +831,30 @@ mod tests {
         dir
     }
 
+    /// A placeholder identity for tests whose fixture can never be
+    /// discovered (the identity check runs after discovery, so it is
+    /// never consulted here).
+    fn dummy_identity() -> ExecutableIdentity {
+        ExecutableIdentity {
+            path: std::path::PathBuf::from("/nonexistent/orqen-placeholder"),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            #[cfg(unix)]
+            inode: 0,
+        }
+    }
+
     #[test]
     fn registry_starts_exactly_one_run_atomically() {
         let registry = RunRegistry::default();
         let definition = &ABSENT_FIXTURE;
         let dir = temp_dir();
 
-        let run_id = registry.start(definition, &dir).expect("first start");
+        let run_id = registry
+            .start(definition, &dir, &dummy_identity())
+            .expect("first start");
         assert!(
-            registry.start(definition, &dir).is_err(),
+            registry.start(definition, &dir, &dummy_identity()).is_err(),
             "second concurrent start must be rejected"
         );
         // No phantom entry: exactly one registered run.
@@ -803,7 +878,7 @@ mod tests {
             let barrier = barrier.clone();
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                registry.start(definition_copy, &dir)
+                registry.start(definition_copy, &dir, &dummy_identity())
             }));
         }
         let results: Vec<Result<String, String>> = handles
@@ -834,13 +909,15 @@ mod tests {
         let definition = &ABSENT_FIXTURE;
         let dir = temp_dir();
 
-        registry.start(definition, &dir).expect("first start");
-        assert!(registry.start(definition, &dir).is_err());
+        registry
+            .start(definition, &dir, &dummy_identity())
+            .expect("first start");
+        assert!(registry.start(definition, &dir, &dummy_identity()).is_err());
         // The active count is back to one run; a rejected start must not
         // have created a second registered entry. Registry internals are
         // private — assert via the admission state: another start must
         // still be rejected (one is active).
-        assert!(registry.start(definition, &dir).is_err());
+        assert!(registry.start(definition, &dir, &dummy_identity()).is_err());
         let _ = std::fs::remove_dir_all(&*dir);
     }
 }

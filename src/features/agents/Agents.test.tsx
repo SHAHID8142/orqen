@@ -26,6 +26,7 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
       execution: false,
       orchestration: false,
       diagnosticExecution: false,
+      diagnosticExecutionNote: "diagnostics disabled in this build",
     },
     discovery: { status: "not_checked" },
     verification: null,
@@ -207,6 +208,37 @@ describe("Agents surface — registry display", () => {
       expect(within(card).getByText("codex-cli 0.42.0")).toBeInTheDocument();
     });
     expect(agentsIpc.verify).toHaveBeenCalledWith("codex");
+  });
+
+  it("shows a disabled adapter's backend reason instead of a run button", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.load.mockResolvedValue([
+      agentRecord({
+        id: "codex",
+        displayName: "OpenAI Codex CLI",
+        discovery: { status: "found", path: "/usr/local/bin/codex" },
+        verification: { status: "verified", version: "codex-cli 0.42.0" },
+        capabilities: {
+          discovery: true,
+          verification: true,
+          execution: true,
+          orchestration: false,
+          diagnosticExecution: false,
+          diagnosticExecutionNote:
+            "diagnostic execution for Codex is disabled: read confinement cannot be enforced per invocation",
+        },
+      }),
+    ]);
+    const { agentsStore } = renderAgents(agentsIpc);
+    await agentsStore.load();
+
+    // No run button may exist for a disabled adapter...
+    expect(screen.queryByRole("button", { name: /Run test with/ })).not.toBeInTheDocument();
+    // ...and the backend's reason must be shown verbatim.
+    const notes = screen.getByTestId("diagnostic-disabled-notes");
+    expect(notes).toHaveTextContent(
+      "diagnostic execution for Codex is disabled: read confinement cannot be enforced per invocation",
+    );
   });
 
   it("surfaces failed verification without claiming success", async () => {

@@ -18,6 +18,7 @@ function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
       execution: false,
       orchestration: false,
       diagnosticExecution: false,
+      diagnosticExecutionNote: "diagnostics disabled in this build",
     },
     discovery: { status: "not_checked" },
     verification: null,

@@ -26,6 +26,7 @@ use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use orqen_lib::agents::definitions::{AgentCapabilities, AgentDefinition};
+use orqen_lib::agents::eligibility::ExecutableIdentity;
 use orqen_lib::agents::runner::{RunOutcome, RunRegistry, RunStatusDto};
 
 /// Fixture definition: adapter id `codex` (so the enabled adapter is
@@ -93,6 +94,13 @@ fn write_fixture(data_dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// The verified identity of this suite's fixture (as the eligibility
+/// ledger would have recorded it at verification time).
+fn fixture_identity(data_dir: &Path) -> ExecutableIdentity {
+    ExecutableIdentity::observe(&data_dir.join("bin").join("orqen-fixture-codex"))
+        .expect("observe fixture identity")
+}
+
 /// Polls until the run reports a terminal outcome (bounded), returning
 /// the recorded outcome.
 fn wait_for_finished(
@@ -128,7 +136,9 @@ fn successful_run_reports_the_fixture_output_truthfully() {
     let _path = PathGuard::fixture_first(&dir.join("bin"));
 
     let registry = RunRegistry::default();
-    let run_id = registry.start(&FIXTURE_CODEX, &dir).expect("start");
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
+        .expect("start");
     let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
 
     assert_eq!(result.outcome, RunOutcome::Succeeded);
@@ -152,7 +162,9 @@ fn diagnostic_process_runs_inside_the_isolated_directory() {
     let _path = PathGuard::fixture_first(&dir.join("bin"));
 
     let registry = RunRegistry::default();
-    let run_id = registry.start(&FIXTURE_CODEX, &dir).expect("start");
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
+        .expect("start");
     let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
 
     assert_eq!(
@@ -187,7 +199,9 @@ fn cancelled_run_terminates_promptly_and_reports_cancelled() {
     let _path = PathGuard::fixture_first(&dir.join("bin"));
 
     let registry = RunRegistry::default();
-    let run_id = registry.start(&FIXTURE_CODEX, &dir).expect("start");
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
+        .expect("start");
     registry.cancel(&run_id).expect("cancel");
     let started = Instant::now();
     let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
@@ -219,7 +233,9 @@ fn finished_run_retention_is_bounded() {
     // pruned from the registry (bounded memory over a long session).
     let mut ids = Vec::new();
     for _ in 0..17 {
-        let run_id = registry.start(&FIXTURE_CODEX, &dir).expect("start");
+        let run_id = registry
+            .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
+            .expect("start");
         wait_for_finished(&registry, &run_id, Duration::from_secs(15));
         ids.push(run_id);
     }
@@ -254,7 +270,9 @@ fn reader_slot_exhaustion_fails_the_run_before_spawn_and_recovers() {
     assert_eq!(orqen_lib::agents::verify::available_reader_slots(), 0);
 
     let registry = RunRegistry::default();
-    let run_id = registry.start(&FIXTURE_CODEX, &dir).expect("start admits");
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
+        .expect("start admits");
     let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
     assert_eq!(result.outcome, RunOutcome::Failed);
     assert!(
@@ -272,7 +290,7 @@ fn reader_slot_exhaustion_fails_the_run_before_spawn_and_recovers() {
     drop(held);
     assert_eq!(orqen_lib::agents::verify::available_reader_slots(), 64);
     let run_id = registry
-        .start(&FIXTURE_CODEX, &dir)
+        .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
         .expect("start recovers");
     let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
     assert_eq!(result.outcome, RunOutcome::Succeeded);
@@ -304,7 +322,7 @@ fn simultaneous_starts_admit_exactly_one() {
         let dir = dir.clone();
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            registry.start(&FIXTURE_CODEX, &dir)
+            registry.start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
         }));
     }
     let results: Vec<Result<String, String>> = handles
@@ -333,4 +351,161 @@ fn simultaneous_starts_admit_exactly_one() {
 
     unsafe { std::env::set_var("PATH", &previous_path) };
     let _ = std::fs::remove_dir_all(&*dir);
+}
+
+#[test]
+fn swapped_executable_is_rejected_before_spawn() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = temp_dir();
+    write_fixture(&dir, "orqen-fixture-codex", "#!/bin/sh\necho original\n");
+    let identity = fixture_identity(&dir);
+    // The executable changes AFTER verification but BEFORE execution.
+    write_fixture(&dir, "orqen-fixture-codex", "#!/bin/sh\necho REPLACED\n");
+    let _path = PathGuard::fixture_first(&dir.join("bin"));
+
+    let registry = RunRegistry::default();
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &identity)
+        .expect("start is admitted; the runner must reject it");
+    let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
+
+    assert_eq!(result.outcome, RunOutcome::Failed);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("changed since it was verified"),
+        "got: {:?}",
+        result.error
+    );
+    assert!(
+        !result.output.contains("REPLACED"),
+        "the swapped executable must never have been spawned"
+    );
+
+    drop(_path);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn executable_at_a_different_path_is_rejected() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = temp_dir();
+    // The identity was verified for the fixture in `bin`; a DIFFERENT
+    // directory (same executable name) is now first on PATH.
+    let verified_bin = dir.join("bin");
+    write_fixture(
+        &dir,
+        "orqen-fixture-codex",
+        "#!/bin/sh\necho verified-one\n",
+    );
+    let identity = ExecutableIdentity::observe(&verified_bin.join("orqen-fixture-codex"))
+        .expect("observe verified identity");
+
+    let bin2 = dir.join("bin2");
+    std::fs::create_dir_all(&bin2).expect("bin2");
+    let second = bin2.join("orqen-fixture-codex");
+    std::fs::write(&second, "#!/bin/sh\necho impostor\n").expect("write impostor");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let previous = std::env::var_os("PATH").unwrap_or_default();
+    let next =
+        std::env::join_paths(std::iter::once(bin2.clone()).chain(std::env::split_paths(&previous)))
+            .expect("join PATH");
+    unsafe { std::env::set_var("PATH", &next) };
+    struct Restore(std::ffi::OsString);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe { std::env::set_var("PATH", &self.0) };
+        }
+    }
+    let _restore = Restore(previous);
+
+    let registry = RunRegistry::default();
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &identity)
+        .expect("start is admitted; the runner must reject it");
+    let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
+
+    assert_eq!(result.outcome, RunOutcome::Failed);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not the one that was verified"),
+        "got: {:?}",
+        result.error
+    );
+    assert!(
+        !result.output.contains("impostor"),
+        "the impostor executable must never have been spawned"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn descendants_are_terminated_after_a_normal_exit() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = temp_dir();
+    // The parent exits SUCCESSFULLY while a descendant keeps running in
+    // the same process group, holding the inherited pipes. The runner
+    // must terminate the whole group even on the success path.
+    write_fixture(
+        &dir,
+        "orqen-fixture-codex",
+        "#!/bin/sh\nsleep 60 &\necho \"descendant: $!\"\n",
+    );
+    let _path = PathGuard::fixture_first(&dir.join("bin"));
+
+    let registry = RunRegistry::default();
+    let run_id = registry
+        .start(&FIXTURE_CODEX, &dir, &fixture_identity(&dir))
+        .expect("start");
+    let result = wait_for_finished(&registry, &run_id, Duration::from_secs(15));
+
+    // The parent's normal exit still yields a truthful success.
+    assert_eq!(
+        result.outcome,
+        RunOutcome::Succeeded,
+        "error: {:?}",
+        result.error
+    );
+    let descendant_pid: u32 = result
+        .output
+        .trim()
+        .strip_prefix("descendant: ")
+        .expect("fixture reports the descendant pid")
+        .trim()
+        .parse()
+        .expect("pid is numeric");
+
+    // No lingering descendant: poll until the pid no longer exists.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive = std::process::Command::new("ps")
+            .args(["-p", &descendant_pid.to_string(), "-o", "pid="])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "descendant {descendant_pid} must be terminated after the parent's normal exit"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // The work directory is removed and no orphan holds the pipes.
+    let work_dir = dir.join("diagnostic-runs").join(&run_id);
+    assert!(!work_dir.exists());
+
+    drop(_path);
+    let _ = std::fs::remove_dir_all(&dir);
 }

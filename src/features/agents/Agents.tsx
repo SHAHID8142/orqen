@@ -127,13 +127,22 @@ function AgentTestRunSection() {
   const settingsReady = settings.phase === "ready";
 
   // Eligible: registry-loaded, executable found, verified, AND this build
-  // can run a safe diagnostic for the adapter (e.g. Claude Code is
-  // currently disabled and must not offer a run button at all).
+  // can run a safe diagnostic for the adapter. Disabled adapters must
+  // not offer a run button — their reason is shown instead, from the
+  // backend DTO (never invented in the UI).
   const eligible = agents.records.filter(
     (record) =>
       record.discovery.status === "found" &&
       record.verification?.status === "verified" &&
       record.capabilities.diagnosticExecution,
+  );
+  // Found + verified agents whose diagnostics this build does not run:
+  // their backend-provided reason is displayed verbatim.
+  const disabledButVerified = agents.records.filter(
+    (record) =>
+      record.discovery.status === "found" &&
+      record.verification?.status === "verified" &&
+      !record.capabilities.diagnosticExecution,
   );
   const preferred = settings.data.mainAgentId;
 
@@ -164,10 +173,20 @@ function AgentTestRunSection() {
 
       {run.phase === "idle" && (
         <div className="test-run-idle">
+          {disabledButVerified.length > 0 && (
+            <ul className="test-run-disabled" data-testid="diagnostic-disabled-notes">
+              {disabledButVerified.map((record) => (
+                <li key={record.id} className="option-note">
+                  <strong>{record.displayName}</strong>: {record.capabilities.diagnosticExecutionNote}
+                </li>
+              ))}
+            </ul>
+          )}
           {eligible.length === 0 ? (
             <p className="option-note">
               No eligible agent yet — an agent becomes eligible after its
-              executable is found and its version is verified.
+              executable is found, its version is verified, and its
+              adapter permits safe diagnostics in this build.
             </p>
           ) : (
             <ul className="test-run-agents">

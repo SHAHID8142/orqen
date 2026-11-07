@@ -55,9 +55,20 @@ pub trait ExecutionAdapter: Send + Sync {
 }
 
 /// OpenAI Codex CLI: `codex exec` is the documented noninteractive mode;
-/// `--sandbox read-only` is the documented least-privilege setting;
+/// `--sandbox read-only` is the documented least-privilege WRITE setting;
 /// `--skip-git-repo-check` is required because the isolated working
 /// directory is not a git repository.
+///
+/// Diagnostic execution is currently DISABLED for this adapter: the
+/// documented sandbox bounds WRITES only — reads are not restricted to
+/// the working directory, so confidentiality is not enforced. The newer
+/// permissions profiles (`permissions.<name>.filesystem`, default-deny
+/// for ungranted paths) could restrict reads, but they are config-file
+/// constructs selected via the top-level `default_permissions` key with
+/// no documented per-invocation flag — applying one would require
+/// modifying the user's global Codex configuration and is version-gated
+/// (~0.138+), so confinement cannot be established and verified across
+/// CLI versions. See docs/ARCHITECTURE.md and docs/DECISIONS.md (D-022).
 pub struct CodexAdapter;
 
 impl ExecutionAdapter for CodexAdapter {
@@ -76,11 +87,21 @@ impl ExecutionAdapter for CodexAdapter {
     }
 
     fn supports_safe_diagnostics(&self) -> bool {
-        true
+        false
+    }
+
+    fn unsafe_diagnostics_reason(&self) -> &'static str {
+        "diagnostic execution for Codex is disabled: the documented \
+         sandbox bounds writes only and does not restrict filesystem \
+         reads to the working directory, and the permissions profiles \
+         that could restrict reads require modifying the user's global \
+         CLI configuration with no documented per-invocation flag"
     }
 
     fn restriction_summary(&self) -> &'static str {
-        "Runs noninteractively with the documented read-only sandbox."
+        "Diagnostic execution is disabled: read confinement cannot be \
+         enforced per invocation without modifying the user's global \
+         CLI configuration."
     }
 
     fn parse_result(
@@ -313,14 +334,40 @@ mod tests {
     }
 
     #[test]
-    fn codex_supports_diagnostics_claude_is_disabled() {
-        assert!(CodexAdapter.supports_safe_diagnostics());
-        // Claude Code diagnostics stay disabled: confidentiality and tool
-        // isolation cannot be verified across CLI versions (see D-019-era
-        // docs and QA_REPORT for the real-CLI evidence).
+    fn no_adapter_claims_unenforceable_isolation() {
+        // Confidentiality isolation is NOT enforceable per invocation for
+        // either provider without modifying the user's global CLI config:
+        // Codex's documented sandbox bounds writes only (reads are
+        // unrestricted; the read-restricting permissions profiles are
+        // config-file constructs with no per-invocation flag, D-022), and
+        // Claude Code inherits the user's global configuration. Both
+        // adapters must therefore report disabled with an accurate,
+        // user-facing reason — an enabled adapter must never claim
+        // stronger filesystem isolation than it enforces.
+        assert!(!CodexAdapter.supports_safe_diagnostics());
         assert!(!ClaudeCodeAdapter.supports_safe_diagnostics());
-        assert!(!ClaudeCodeAdapter.unsafe_diagnostics_reason().is_empty());
-        assert!(ClaudeCodeAdapter.restriction_summary().contains("disabled"));
+        for reason in [
+            CodexAdapter.unsafe_diagnostics_reason(),
+            ClaudeCodeAdapter.unsafe_diagnostics_reason(),
+        ] {
+            assert!(!reason.is_empty(), "disabled adapters need a reason");
+            assert!(reason.contains("disabled"), "reason: {reason}");
+        }
+        for summary in [
+            CodexAdapter.restriction_summary(),
+            ClaudeCodeAdapter.restriction_summary(),
+        ] {
+            assert!(summary.contains("disabled"), "summary: {summary}");
+        }
+        // The documented least-privilege arguments are retained for a
+        // future re-enable, but they must never be presented as read
+        // confinement.
+        assert!(
+            CodexAdapter
+                .build_arguments()
+                .windows(2)
+                .any(|w| w[0] == "--sandbox" && w[1] == "read-only")
+        );
     }
 
     #[test]
