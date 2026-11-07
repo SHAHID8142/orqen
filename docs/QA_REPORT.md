@@ -270,6 +270,7 @@ Observed evidence (read from GitHub, never assumed):
 | 42056645579 | push 62862da | `failure`, 4s, jobs created but not started | same billing-lock annotation |
 | — | push 37949ea | **no run created** | restriction is intermittent |
 | 42061320009 | push 5a2d59e | `failure`, 10s, jobs created but not started | same billing-lock annotation — restriction confirmed intermittent; every observed run is refused |
+| 42345748478 | push 45de6c1 (Feature 002 remediation) | `failure`, 4s, both jobs refused | same billing-lock annotation; 0 steps executed — observed and recorded for this remediation, not a code failure |
 
 Diagnosis: the workflow file is valid — `actionlint` exit 0, GitHub lists the workflow `active`, and jobs instantiated while runs were still being created — so the blocker is the **GitHub account billing restriction**, not the workflow. Per D-011 the repository stays PUBLIC and no Actions-minute purchases are required development steps; CI is simply recorded as blocked until GitHub permits execution again.
 
