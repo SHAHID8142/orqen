@@ -21,6 +21,25 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 002 final manual acceptance — REAL-PROVIDER RUN (2026-11-07, user-authorized)
+
+**This run was explicitly authorized by the owner before execution (single run; no other provider calls).** The ORQEN desktop app was driven through its real UI (accessibility-element actions; screenshots as evidence).
+
+| Step | Observed result (actual, not simulated) |
+| --- | --- |
+| Launch | `npm run tauri dev` (dev server :1420 → HTTP 200; app window live; Rust IPC **Connected**; persisted project and Main-Agent preference loaded from SQLite) |
+| Codex discoverability | `codex` is NOT on the system PATH. The app's process PATH was launched with the previously authorized cached binary directory prepended (`~/.npm/_npx/…/node_modules/.bin`) — **no package was installed and no configuration was changed** (launch-time env only, disclosed). The Agents UI then showed **"Executable found"** with that path |
+| Authentication | `codex login status` (run out-of-band; never exposes credentials): **"Logged in using ChatGPT"** |
+| UI verification | "Verify CLI" clicked in the app: **Verified version codex-cli 0.164.0**, "Last checked 2026-11-07 10:09:26 UTC" (re-checked 10:27:05 UTC on the relaunched instance) — backend-observed, timestamped in the UI |
+| Diagnostic availability | The Agent Test Run section showed the provider-quota warning, Claude Code's disabled reason **verbatim from the backend**, and the enabled **"Run test with OpenAI Codex CLI"** button |
+| **The authorized run** | "Run test with…" → the app's confirmation card (with the enforced-restrictions note) → "Confirm & run". Result after the preflight + run: **Diagnostic result: Succeeded — Agent: codex — Duration: 8.6 s — Exit code: 0 — Agent output: "I'm available and ready to help."** — a REAL authenticated provider response (screenshot captured) |
+| Cleanup evidence | `~/Library/Application Support/io.github.shahid8142.orqen/diagnostic-runs/` **empty** after the run (isolated work dir removed by the runner); **no ORQEN-spawned codex CLI or probe processes remained** (the Codex entries in the process list belong to the owner's separate ChatGPT desktop app) |
+| Observations (not changed) | The Overview surface still lists Phase 3 items under "Planned — not implemented yet" — stale overview copy, left untouched (no unrelated code changes in this task) |
+
+**Real-provider acceptance: PASS — a successful authenticated provider diagnostic has now been demonstrated end-to-end through the app UI, with the enforced per-run sandbox protections active (version gate + enforcement preflight + confirmation card). One provider call was made, as authorized.**
+
+**Windows: unverified (unchanged). CI: BLOCKED — EXTERNAL (unchanged).**
+
 ## Phase 3 · Feature 002 last review corrections verification (2026-11-07, local, macOS 27.2 arm64)
 
 | # | Check | Method | Result |
