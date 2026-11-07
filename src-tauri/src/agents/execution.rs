@@ -434,8 +434,25 @@ fn run_probe(mut command: Command, timeout: Duration) -> Result<ProbeOutcome, Pr
         std::thread::sleep(Duration::from_millis(20));
     }
     drop(drain_guard); // readers stop at their next wakeup
-    let _ = stdout_reader.join().ok();
-    let _ = stderr_reader.join().ok();
+    // Join ONLY completed readers — a join on a reader still blocked in
+    // read() (a descendant that escaped the process group can keep the
+    // write-end open indefinitely) would defeat the end-to-end deadline.
+    // Incomplete readers are detached instead: abandonment makes them
+    // exit at their next wakeup, and one blocked in read() exits when
+    // the last pipe write-end closes — its reader-slot reservation
+    // stays accounted for until that moment (bounded by the enforced
+    // pool), so no capacity is lost and nothing accumulates silently.
+    let readers_finished = buffers
+        .lock()
+        .map(|buffers| buffers.all_done())
+        .unwrap_or(true);
+    if readers_finished {
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+    } else {
+        drop(stdout_reader);
+        drop(stderr_reader);
+    }
 
     let guard = buffers.lock().expect("probe buffers lock");
     let stdout_text = String::from_utf8_lossy(&guard.streams[0].data).to_string();
@@ -955,7 +972,6 @@ pub fn diagnostic_prompt() -> &'static str {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn any_work_dir() -> std::path::PathBuf {
         std::env::temp_dir().join("orqen-adapter-test-workdir")
@@ -965,12 +981,9 @@ mod tests {
     // These fixtures are the only processes the automated tests run —
     // never a real provider CLI.
 
-    /// Serializes probe-heavy tests among themselves so the shared
-    /// reader-slot pool is not contended between sibling tests.
-    static PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     /// Runs a probe, retrying while the reader-slot pool is busy with
     /// sibling tests (the documented user-facing behavior on exhaustion).
+    #[cfg(unix)]
     fn run_probe_with_retry(
         build: impl Fn() -> Command,
         timeout: Duration,
@@ -987,19 +1000,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn probe_command(script: &Path, dir: &Path) -> Command {
         let mut command = Command::new(script);
         command.current_dir(dir);
         command
     }
 
+    /// Writes a controlled executable fixture (unix: a shell script with
+    /// the executable bit). Windows needs no fixture: every process-
+    /// spawning test is unix-gated and the platform-independent adapter
+    /// tests never spawn anything.
+    #[cfg(unix)]
     fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
         fs::write(&path, body).expect("write script");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
         path
     }
 
+    #[cfg(unix)]
     fn probe_fixture_dir(label: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("orqen-probe-{label}-{}", uuid::Uuid::new_v4()));
@@ -1008,6 +1029,7 @@ mod tests {
     }
 
     /// True while the process with `pid` still exists.
+    #[cfg(unix)]
     fn process_alive(pid: u32) -> bool {
         Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "pid="])
@@ -1019,6 +1041,7 @@ mod tests {
     }
 
     /// Polls until the recorded descendant is gone (bounded).
+    #[cfg(unix)]
     fn assert_descendant_dead(pidfile: &Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1039,7 +1062,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_completes_normally() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("ok");
         let script = write_script(&dir, "tool", "#!/bin/sh\necho probe-ok\n");
         let outcome =
@@ -1053,7 +1076,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_times_out_and_terminates_the_group() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("hang");
         let script = write_script(&dir, "tool", "#!/bin/sh\nsleep 30\n");
         let started = Instant::now();
@@ -1075,7 +1098,7 @@ mod tests {
         // stdout open: the deadline must still hold (the pre-fix code
         // blocked forever in post-exit read_to_string) and the
         // descendant must not survive the probe.
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("descendant");
         let script = write_script(
             &dir,
@@ -1108,7 +1131,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_bounds_excessive_stdout() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("stdout-flood");
         // 5 MiB on stdout — far beyond the retained bound; the pipe must
         // be drained concurrently (no deadlock) and memory stays bounded.
@@ -1136,7 +1159,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_bounds_excessive_stderr() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("stderr-flood");
         let script = write_script(
             &dir,
@@ -1158,7 +1181,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_handles_both_streams_producing_concurrently() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("both-streams");
         // Both pipes fill simultaneously — concurrent draining must
         // prevent the classic write-side deadlock.
@@ -1179,8 +1202,86 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn probe_returns_within_deadline_when_a_descendant_escapes_the_process_group() {
+        // A descendant that calls setsid() leaves the probe's process
+        // group — the group SIGKILL cannot reach it — and keeps both
+        // pipes open. The probe must still return within its deadline
+        // (detached readers, bounded grace): an unbounded join would
+        // have waited for the escaped descendant's full 30 s sleep.
+        // Serialize against the verification pool tests (same lib-test
+        // process): the escaped descendant briefly holds reader slots.
+        let _probe_lock = super::super::verify::probe_test_lock();
+        let dir = probe_fixture_dir("escaped");
+        // The script waits until the descendant has actually escaped
+        // (the pidfile is written AFTER setsid) before exiting — the
+        // group kill that follows the script's exit can then never
+        // reach the descendant, making the escape deterministic.
+        let script = write_script(
+            &dir,
+            "tool",
+            "#!/bin/sh\npython3 -c \"import os,sys,time\n\
+             os.setsid()\n\
+             open(sys.argv[1], 'w').write(str(os.getpid()))\n\
+             time.sleep(30)\" \"$1\" &\n\
+             i=0\nwhile [ ! -s \"$1\" ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done\n\
+             echo probe-done\n",
+        );
+        let pidfile = dir.join("escaped.pid");
+        let script_for_probe = script.clone();
+        let pidfile_for_probe = pidfile.clone();
+        let started = Instant::now();
+        let outcome = run_probe_with_retry(
+            || {
+                let mut command = Command::new(&script_for_probe);
+                command.arg(&pidfile_for_probe).current_dir(&dir);
+                command
+            },
+            Duration::from_secs(5),
+        )
+        .expect("probe");
+        let elapsed = started.elapsed();
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.stdout.contains("probe-done"));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "an escaped pipe-holding descendant must not extend the probe \
+             past the deadline (took {elapsed:?})"
+        );
+
+        // Test-owned cleanup: the escaped descendant is outside the
+        // probe's process group, so it must be killed explicitly.
+        let escaped_pid: u32 = fs::read_to_string(&pidfile)
+            .expect("the escaped descendant recorded its pid")
+            .trim()
+            .parse()
+            .expect("pid is numeric");
+        unsafe {
+            libc::kill(escaped_pid as libc::pid_t, libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(escaped_pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the test-owned escaped descendant must be cleaned up"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Its slots return only after the pipes close (post-kill).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while super::super::verify::available_reader_slots() < 64 {
+            assert!(
+                Instant::now() < deadline,
+                "reader slots must be recovered after the escaped descendant dies"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn probe_reports_nonzero_exit() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("nonzero");
         let script = write_script(&dir, "tool", "#!/bin/sh\necho oops >&2\nexit 3\n");
         let outcome =
@@ -1198,7 +1299,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn repeated_probes_do_not_leak_resources() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         let dir = probe_fixture_dir("repeat");
         let script = write_script(&dir, "tool", "#!/bin/sh\necho round\n");
         for _ in 0..3 {
@@ -1219,7 +1320,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_fails_closed_when_reader_slots_are_exhausted() {
-        let _lock = PROBE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe_lock = super::super::verify::probe_test_lock();
         // Reserve the whole pool (pairs until none remain — the failing
         // call releases its own first slot internally).
         let mut held = Vec::new();

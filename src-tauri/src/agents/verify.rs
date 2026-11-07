@@ -427,6 +427,17 @@ fn read_into_shared(mut stream: impl Read, shared: &SharedOutput, stream_id: Str
     shared.finish_stream(stream_id);
 }
 
+/// Test-only: the process-spawn serialization lock, shared by every
+/// test that spawns probe processes or holds reader-slot reservations
+/// (verify pool tests AND the execution module's probe tests — the
+/// escaped-descendant fixture holds slots for a moment, which must not
+/// overlap pool tests; same lib-test process, parallel threads).
+#[cfg(test)]
+pub(crate) fn probe_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,8 +451,7 @@ mod tests {
     /// Serializes tests that spawn processes: they share the process-global
     /// detached-reader counter (cargo runs tests in parallel by default).
     fn probe_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        super::probe_test_lock()
     }
 
     #[cfg(unix)]

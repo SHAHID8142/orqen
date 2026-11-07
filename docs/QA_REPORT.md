@@ -21,6 +21,25 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 002 last review corrections verification (2026-11-07, local, macOS 27.2 arm64)
+
+| # | Check | Method | Result |
+| --- | --- | --- | --- |
+| 1 | Frontend gates | `npm ci` → `npm run verify` | PASS — **118/118** |
+| 2 | Rust gates | `npm run rust:fmt` + `npm run rust:clippy` + `npm run rust:check` | PASS — fmt clean; clippy `-D warnings` 0 errors (both feature configs); check clean |
+| 3 | Rust tests | `cargo test` (plain) | PASS — **106 lib + 12 sandbox-enforcement + 9 execution-integration + 4 persistence** |
+| 4 | Timeout path | `cargo test --features test-timeouts` | PASS — +1 |
+| 5 | **Unbounded joins removed** | code + `probe_returns_within_deadline_when_a_descendant_escapes_the_process_group` | PASS — completed readers are joined; incomplete readers are DETACHED (exit at next wakeup or when the last pipe write-end closes; enforced reader-slot reservation accounted until then). The fixture's setsid-escaped descendant holds both pipes outside the probe's group; the probe returns within its 5 s deadline (an unbounded join would have waited 30 s), and the test kills its escaped descendant explicitly and waits for death + slot recovery |
+| 6 | **Server shutdown** | rewritten `LoopbackHttpServer` | PASS — nonblocking listener, bounded accept-loop wakeup, shutdown flag; an RAII guard sets the flag and JOINS the thread on every path (assertion failures included); the positive/negative controls are unchanged (unsandboxed curl exit 0 + sentinel; sandboxed connect-denial signature); the scenario runs TWICE with a deterministic shutdown between rounds — no listener thread or port left behind |
+| 7 | **Windows test compilation** | audit + gating | PASS (source level) — the execution tests module's Unix-only import, fixture helper (`write_script`), and process helpers are `#[cfg(unix)]`-gated; all 10 process-spawning tests are unix-gated; the 12 platform-independent adapter/parsing/version tests have no Unix APIs and remain runnable on Windows |
+| 8 | Windows cross-target check | `cargo check --target x86_64-pc-windows-msvc` from this macOS host | **BLOCKED — toolchain, not code**: fails in the `libsqlite3-sys v0.39.1` build script (`cc --target=x86_64-pc-windows-msvc … fatal error: 'stdlib.h' file not found` — no MSVC C toolchain/Windows SDK headers here). The check NEVER reaches Orqen's own code. Installing a toolchain would be a global system change requiring user authorization. Windows runtime verification remains UNCLAIMED |
+| 9 | Enforcement gate | `ORQEN_CODEX_BIN=<authorized cached codex-cli 0.164.0> ORQEN_REQUIRE_CODEX_ENFORCEMENT=1 cargo test --test codex_sandbox_enforcement` | PASS — **12/12 executed** (network test now exercises two full server rounds) |
+| 10 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 11 | Desktop launch probe | `cargo build` + direct launch, observed 12 s | PASS (process level) — alive, 0 error lines |
+| 12 | CI status | GitHub Actions | BLOCKED — EXTERNAL (billing restriction, unchanged) |
+
+**Real-provider status: NOT RUN.** No authenticated Codex prompt; no package downloads.
+
 ## Phase 3 · Feature 002 preflight safety & test-integrity fix verification (2026-11-07, local, macOS 27.2 arm64)
 
 **Scope:** two confirmed defects fixed — the preflight probe lifecycle (deadline did not cover output collection; unbounded blocking reads could hang forever on inherited pipes) and the network denial test (an accept-and-close listener made nonzero curl exits meaningless). All evidence below is sandbox-harness / controlled-fixture evidence; NO authenticated `codex exec` run was performed and no provider service was contacted.

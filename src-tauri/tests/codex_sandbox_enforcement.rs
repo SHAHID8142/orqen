@@ -447,6 +447,86 @@ fn nested_escalation_is_denied() {
     let _ = std::fs::remove_dir_all(&work_dir);
 }
 
+/// A controlled loopback HTTP test server: serves one valid HTTP 200
+/// with a sentinel body per connection, wakes its accept loop on a
+/// bounded interval, and is stopped + joined DETERMINISTICALLY on drop
+/// (also on assertion failures and early exits). No thread or port is
+/// left behind.
+struct LoopbackHttpServer {
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server_thread: Option<std::thread::JoinHandle<()>>,
+    port: u16,
+}
+
+impl LoopbackHttpServer {
+    fn start() -> Self {
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let port = listener.local_addr().expect("local addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("set the listener nonblocking");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
+        const SENTINEL: &[u8] = b"ORQEN-NET-SENTINEL-OK";
+        let server_thread = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // Nonblocking accept with a bounded wakeup: the loop can
+            // observe the shutdown flag instead of waiting forever in
+            // accept().
+            while !thread_shutdown.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _addr)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+                        let mut request = [0u8; 1024];
+                        let _ = stream.read(&mut request);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            SENTINEL.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(SENTINEL);
+                        // stream drop closes the connection
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            // listener drops here, releasing the port
+        });
+        LoopbackHttpServer {
+            shutdown,
+            server_thread: Some(server_thread),
+            port,
+        }
+    }
+
+    /// Stops the server and joins its thread deterministically.
+    fn shutdown(mut self) {
+        use std::sync::atomic::Ordering;
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.server_thread.take() {
+            handle.join().expect("the server thread must stop cleanly");
+        }
+    }
+}
+
+impl Drop for LoopbackHttpServer {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.server_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[test]
 fn network_access_from_tool_commands_is_denied() {
     // A nonzero sandboxed curl alone proves NOTHING (a dead server,
@@ -463,70 +543,57 @@ fn network_access_from_tool_commands_is_denied() {
         return;
     };
 
-    // Loopback-only HTTP server: one valid response per connection,
-    // bounded connection handling, shut down when the listener drops.
-    const SENTINEL: &[u8] = b"ORQEN-NET-SENTINEL-OK";
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
-    let port = listener.local_addr().expect("local addr").port();
-    let server = std::thread::spawn(move || {
-        use std::io::Write;
-        for stream in listener.incoming().flatten() {
-            let mut stream = stream;
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-            let mut request = [0u8; 1024];
-            let _ = std::io::Read::read(&mut stream, &mut request);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                SENTINEL.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.write_all(SENTINEL);
-            // stream drop closes the connection
-        }
-        // `listener` moved here: it drops when incoming() ends (after the
-        // test releases it), ending this thread — no leak.
-    });
+    // Run the full scenario TWICE: the second run proves no listener
+    // thread or port is left behind by the first (the server is stopped
+    // and joined deterministically between runs).
+    for round in 1..=2 {
+        let server = LoopbackHttpServer::start();
+        let work_dir = temp_dir("deny-network");
+        let policy = codex_diagnostic_run_policy(&work_dir);
+        let url = format!("http://127.0.0.1:{}/", server.port);
 
-    let work_dir = temp_dir("deny-network");
-    let policy = codex_diagnostic_run_policy(&work_dir);
-    let url = format!("http://127.0.0.1:{port}/");
+        // Positive control: the EXACT command, unsandboxed.
+        let (code, output) = run_unsandboxed(&["curl", "-m", "5", "-sS", &url], &work_dir);
+        assert_eq!(
+            code,
+            Some(0),
+            "round {round}: positive control failed — the test environment \
+             (curl/server) is broken, NOT the sandbox: {output}"
+        );
+        assert!(
+            output.contains("ORQEN-NET-SENTINEL-OK"),
+            "round {round}: positive control must receive the sentinel body: {output}"
+        );
 
-    // Positive control: the EXACT command, unsandboxed.
-    let (code, output) = run_unsandboxed(&["curl", "-m", "5", "-sS", &url], &work_dir);
-    assert_eq!(
-        code,
-        Some(0),
-        "positive control failed — the test environment (curl/server) is broken, \
-         NOT the sandbox: {output}"
-    );
-    assert!(
-        output.contains("ORQEN-NET-SENTINEL-OK"),
-        "positive control must receive the sentinel body: {output}"
-    );
+        // The same request inside the Codex sandbox.
+        let (code, output) = run_under_policy(
+            &codex,
+            &work_dir,
+            &policy.config_overrides,
+            &["curl", "-m", "5", "-sS", &url],
+        );
+        assert_ne!(
+            code,
+            Some(0),
+            "round {round}: the sandboxed request must fail: {output}"
+        );
+        assert!(
+            !output.contains("ORQEN-NET-SENTINEL-OK"),
+            "round {round}: the sentinel body must never be received through the \
+             sandbox: {output}"
+        );
+        assert!(
+            output.contains("Failed to connect to 127.0.0.1"),
+            "round {round}: the failure must be the connect-denial signature on a \
+             URL that provably works unsandboxed — not an invalid URL, missing \
+             curl, empty reply, or generic harness failure: {output}"
+        );
 
-    // The same request inside the Codex sandbox.
-    let (code, output) = run_under_policy(
-        &codex,
-        &work_dir,
-        &policy.config_overrides,
-        &["curl", "-m", "5", "-sS", &url],
-    );
-    assert_ne!(code, Some(0), "the sandboxed request must fail: {output}");
-    assert!(
-        !output.contains("ORQEN-NET-SENTINEL-OK"),
-        "the sentinel body must never be received through the sandbox: {output}"
-    );
-    assert!(
-        output.contains("Failed to connect to 127.0.0.1"),
-        "the failure must be the connect-denial signature on a URL that \
-         provably works unsandboxed — not an invalid URL, missing curl, \
-         empty reply, or generic harness failure: {output}"
-    );
-
-    let _ = std::fs::remove_dir_all(&work_dir);
-    // Release the listener: incoming() ends, the server thread exits.
-    drop(server);
+        let _ = std::fs::remove_dir_all(&work_dir);
+        // Deterministic shutdown: flag + join (also the Drop path on
+        // assertion failures).
+        server.shutdown();
+    }
 }
 
 #[test]
