@@ -183,8 +183,11 @@ pub fn ensure_diagnostic_admissible(
 /// Eligibility is backend-authoritative and cannot be bypassed by a
 /// direct IPC invocation: the adapter must permit diagnostics, the
 /// agent must have been verified in this session within the bounded
-/// freshness window, and the runner re-checks the executable's identity
-/// before spawning.
+/// freshness window and with a supported CLI version, the ACTUAL
+/// installed executable must pass the provider-free sandbox enforcement
+/// preflight (the confinement mechanism is documented beta — safety is
+/// proven per run on the real binary, never inferred from the version),
+/// and the runner re-checks the executable's identity before spawning.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_diagnostic_run(
@@ -196,6 +199,22 @@ pub async fn start_diagnostic_run(
     let definition = definition_for_id(&agent_id)?;
     let verified_identity =
         ensure_diagnostic_admissible(definition, &ledger).map_err(CommandError::InvalidInput)?;
+    // Enforcement preflight against the verified executable — before
+    // admission, so a failed preflight never consumes the single-run
+    // slot. The runner's identity re-check guarantees the spawned
+    // executable IS the one preflighted here.
+    let requires_preflight = crate::agents::execution::find_adapter(definition.id)
+        .map(|adapter| adapter.requires_enforcement_preflight())
+        .unwrap_or(false);
+    if requires_preflight {
+        let executable = verified_identity.path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::agents::execution::codex_enforcement_preflight(&executable)
+        })
+        .await
+        .map_err(|e| CommandError::Storage(format!("the preflight task failed: {e}")))?
+        .map_err(CommandError::Storage)?;
+    }
     let data_dir = app
         .path()
         .app_data_dir()

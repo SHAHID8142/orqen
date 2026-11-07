@@ -15,7 +15,9 @@
 //! - Authentication always comes from the CLI's own configuration; no
 //!   credentials are read, stored, or logged.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// The fixed diagnostic prompt. Deliberately not configurable: this
 /// feature validates the execution architecture, not the model.
@@ -44,8 +46,19 @@ pub trait ExecutionAdapter: Send + Sync {
     /// least-privilege restrictions for a diagnostic run. Adapters that
     /// cannot must report false and stay disabled.
     fn supports_safe_diagnostics(&self) -> bool;
+    /// Whether starting a diagnostic requires a provider-free sandbox
+    /// enforcement preflight against the verified executable. The
+    /// confinement mechanism is documented BETA ("under active
+    /// development and may change"), so safety must be proven on the
+    /// actual installed binary — never inferred from the version number
+    /// alone.
+    fn requires_enforcement_preflight(&self) -> bool {
+        false
+    }
     /// The minimum CLI version the confinement policy requires, when the
-    /// policy is version-gated. `None` — no version gate.
+    /// policy is version-gated. This is a compatibility FLOOR (the flags
+    /// and profile schema must exist), never a safety claim — the
+    /// enforcement preflight is the actual gate.
     fn minimum_cli_version(&self) -> Option<(u64, u64, u64)> {
         None
     }
@@ -164,6 +177,170 @@ pub fn codex_diagnostic_run_policy(work_dir: &Path) -> CodexRunPolicy {
     }
 }
 
+/// Hard timeout for one preflight probe (the sandbox harness normally
+/// completes in well under a second).
+const PREFLIGHT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs a command to completion with a hard timeout, returning its exit
+/// code and combined output. A timed-out child is killed (fail closed).
+/// Probes produce tiny output, so reading the pipes after exit cannot
+/// deadlock.
+fn run_probe(mut command: Command, timeout: Duration) -> Result<(Option<i32>, String), String> {
+    use std::io::Read;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("could not start the sandbox probe: {e}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut combined = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout.read_to_string(&mut combined);
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut combined);
+                }
+                return Ok((status.code(), combined));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("the sandbox probe timed out".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("the sandbox probe failed: {e}")),
+        }
+    }
+}
+
+/// Removes every preflight fixture on drop (also on error paths).
+struct PreflightFixtures {
+    work_dir: PathBuf,
+    protected: PathBuf,
+    write_target: PathBuf,
+}
+
+impl Drop for PreflightFixtures {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.work_dir);
+        let _ = std::fs::remove_file(&self.protected);
+        let _ = std::fs::remove_file(&self.write_target);
+    }
+}
+
+/// Provider-free sandbox enforcement preflight (D-024): proves that the
+/// ACTUAL installed CLI at `executable` enforces the diagnostic
+/// confinement policy before a run is admitted. Runs the production
+/// policy builder through `codex sandbox` — the same policy engine
+/// `codex exec` uses — against harmless temporary fixtures; NO provider
+/// service is contacted.
+///
+/// Probes, in order:
+/// 1. positive control — the harness accepts the policy arguments and
+///    the permitted work-dir read succeeds (this is what distinguishes
+///    a real denial from "the command never ran");
+/// 2. a protected read OUTSIDE the granted roots is denied and its
+///    content never appears in the output;
+/// 3. a write outside the work dir is denied and creates nothing;
+/// 4. an invalid profile is a hard error (the fail-closed mechanism is
+///    alive, not silently ignored).
+///
+/// Any violation, harness error, or timeout fails closed: the caller
+/// must refuse to start the diagnostic.
+pub fn codex_enforcement_preflight(executable: &Path) -> Result<(), String> {
+    let fixtures = PreflightFixtures {
+        work_dir: std::env::temp_dir().join(format!("orqen-preflight-{}", uuid::Uuid::new_v4())),
+        protected: std::env::temp_dir().join(format!(
+            "orqen-preflight-protected-{}",
+            uuid::Uuid::new_v4()
+        )),
+        write_target: std::env::temp_dir()
+            .join(format!("orqen-preflight-write-{}", uuid::Uuid::new_v4())),
+    };
+    std::fs::create_dir_all(&fixtures.work_dir)
+        .map_err(|e| format!("could not create the preflight work dir: {e}"))?;
+    std::fs::write(
+        fixtures.work_dir.join("orqen-preflight-allowed.txt"),
+        "orqen-preflight-ok",
+    )
+    .map_err(|e| format!("could not write the preflight fixture: {e}"))?;
+    std::fs::write(&fixtures.protected, "orqen-preflight-protected-content")
+        .map_err(|e| format!("could not write the preflight fixture: {e}"))?;
+
+    let policy = codex_diagnostic_run_policy(&fixtures.work_dir);
+    let sandbox_probe =
+        |overrides: &[String], args: &[&str]| -> Result<(Option<i32>, String), String> {
+            let mut command = Command::new(executable);
+            command.arg("sandbox");
+            for override_value in overrides {
+                command.arg("-c").arg(override_value);
+            }
+            command.arg("--").args(args).current_dir(&fixtures.work_dir);
+            run_probe(command, PREFLIGHT_PROBE_TIMEOUT)
+        };
+    let excerpt = |output: &str| -> String { output.trim().chars().take(200).collect() };
+
+    // 1. Positive control: the harness runs with our policy arguments
+    // and the permitted read succeeds.
+    let (code, output) = sandbox_probe(
+        &policy.config_overrides,
+        &["cat", "orqen-preflight-allowed.txt"],
+    )?;
+    if code != Some(0) || !output.contains("orqen-preflight-ok") {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: the permitted diagnostic read did not succeed ({})",
+            excerpt(&output)
+        ));
+    }
+
+    // 2. A protected read outside the granted roots must be denied —
+    // the content must never appear.
+    let protected_arg = fixtures.protected.to_string_lossy().to_string();
+    let (code, output) = sandbox_probe(&policy.config_overrides, &["cat", &protected_arg])?;
+    if code == Some(0) || output.contains("orqen-preflight-protected-content") {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: a protected file outside the diagnostic \
+             directory was readable ({})",
+            excerpt(&output)
+        ));
+    }
+
+    // 3. A write outside the work dir must be denied and create nothing.
+    let write_arg = fixtures.write_target.to_string_lossy().to_string();
+    let (code, output) = sandbox_probe(&policy.config_overrides, &["touch", &write_arg])?;
+    if code == Some(0) || fixtures.write_target.exists() {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: a file could be created outside the diagnostic \
+             directory ({})",
+            excerpt(&output)
+        ));
+    }
+
+    // 4. An invalid profile must be a hard error — the fail-closed
+    // mechanism is alive (an update that silently IGNORED an unknown
+    // value would otherwise downgrade the policy without notice).
+    let mut broken_overrides = policy.config_overrides.clone();
+    broken_overrides[0] = broken_overrides[0].replace("\"deny\"", "\"bogus-value\"");
+    let (code, output) = sandbox_probe(&broken_overrides, &["echo", "preflight-should-not-run"])?;
+    if code == Some(0) {
+        return Err(format!(
+            "the installed CLI did not pass the sandbox enforcement \
+             preflight: an invalid permissions profile was accepted \
+             instead of failing closed ({})",
+            excerpt(&output)
+        ));
+    }
+
+    Ok(())
+}
+
 /// OpenAI Codex CLI: `codex exec` is the documented noninteractive mode.
 ///
 /// Per-run confinement (D-023): the invocation loads NONE of the user's
@@ -197,6 +374,10 @@ impl ExecutionAdapter for CodexAdapter {
             "--ephemeral".to_string(),
             // The isolated working directory is not a git repository.
             "--skip-git-repo-check".to_string(),
+            // Unknown configuration fields are a hard error, never a
+            // silent ignore — a schema change in a future CLI cannot
+            // silently drop part of the confinement profile.
+            "--strict-config".to_string(),
         ];
         // Each override is its own `-c key=value` pair.
         args.extend(
@@ -213,6 +394,14 @@ impl ExecutionAdapter for CodexAdapter {
         // The read-confinement profile is VERIFIED on macOS Seatbelt
         // only (D-023). Linux (Landlock/bubblewrap) and Windows
         // enforcement are not verified — fail closed there.
+        cfg!(target_os = "macos")
+    }
+
+    fn requires_enforcement_preflight(&self) -> bool {
+        // The permissions mechanism is documented BETA: every diagnostic
+        // start must PROVE the installed binary enforces the confinement
+        // policy (D-024) — the version floor is only a compatibility
+        // guard, never a safety claim.
         cfg!(target_os = "macos")
     }
 

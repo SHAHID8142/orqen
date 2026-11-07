@@ -21,6 +21,28 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 002 final acceptance hardening verification (2026-11-07, local, macOS 27.2 arm64)
+
+**Scope precision:** all evidence below is SANDBOX-HARNESS evidence (`codex sandbox`, the same policy engine `codex exec` uses, provider-free) plus the per-run production preflight. NO `codex exec` diagnostic was executed and no provider service was contacted by any automated test; end-to-end `codex exec` enforcement still awaits one user-authorized real-provider run. No new Codex package was downloaded or installed.
+
+| # | Check | Method | Result |
+| --- | --- | --- | --- |
+| 1 | Frontend gates | `npm ci` → `npm run verify` | PASS — **118/118** |
+| 2 | Rust gates | `npm run rust:fmt` + `npm run rust:clippy` + `npm run rust:check` | PASS — fmt clean; clippy `-D warnings` 0 errors; check clean |
+| 3 | Rust tests | `cargo test` (plain) | PASS — 96 lib + 12 sandbox-enforcement (labeled skips without a CLI) + 9 execution-integration + 4 persistence |
+| 4 | Timeout path | `cargo test --features test-timeouts` | PASS — +1 |
+| 5 | **Enforcement suite (security gate)** | `ORQEN_CODEX_BIN=<codex-cli 0.164.0, previously authorized npx cache> ORQEN_REQUIRE_CODEX_ENFORCEMENT=1 cargo test --test codex_sandbox_enforcement` | PASS — **12/12 real runs**, now independently covering: protected read in `$HOME`; protected read EXPLICITLY under `/tmp`; protected read under the macOS per-user temp dir (`$TMPDIR`) — three separate tests; permitted reads/writes inside the work dir; write outside denied (nothing created); tool-call network denial with a positive control (the listener is proven reachable unsandboxed first); invalid profile = config error; unknown profile = config error; nested escalation blocked with the OUTER-sandbox signature; the production preflight accepts a verifying binary and fails closed for a non-codex binary |
+| 6 | Denial honesty | every denial test asserts the OS signature (`Operation not permitted`) or the config-error text | PASS — a harness failure can never be mistaken for successful enforcement |
+| 7 | Gate semantics | suite run WITHOUT a binary under `ORQEN_REQUIRE_CODEX_ENFORCEMENT=1` | FAILS as required (11 failures, "ENFORCEMENT GATE FAILURE: no usable Codex CLI … must not be skipped"); without the flag, skips are clearly labeled `[SKIPPED-LABELED]` |
+| 8 | **Per-run preflight (D-024)** | `codex_enforcement_preflight` wired into `start_diagnostic_run` before admission; 4 probes (positive control / protected read denied / outside write denied / invalid profile hard-errored), 30 s per-probe timeout, fixtures cleaned on all paths | PASS (real binary) — every diagnostic start re-proves enforcement on the actual installed executable; a failed preflight never consumes the single-run admission slot |
+| 9 | `--strict-config` | added to the exec invocation; unit test pins its presence | PASS — unknown configuration fields hard-error (safe: `--ignore-user-config` means only Orqen's fields exist) |
+| 10 | Claims-vs-tests audit | doc cross-check | PASS — the network-restriction claim is now backed by a real negative test; filesystem claims list all three protected locations; docs state explicitly that harness proofs are not `codex exec` execution |
+| 11 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 12 | Desktop launch probe | `cargo build` + direct launch, observed 12 s | PASS (process level) — alive, 0 error lines |
+| 13 | CI status | GitHub Actions | BLOCKED — EXTERNAL (billing restriction, unchanged) |
+
+**Real-provider status: PARTIAL (unchanged).** No authenticated Codex prompt was run (not authorized); no package was downloaded or installed (the previously cached 0.164.0 binary was reused).
+
 ## Phase 3 · Feature 002 safe Codex adapter completion verification (2026-11-07, local, macOS 27.2 arm64)
 
 **Research correction (vs. D-022):** per-run Codex permissions ARE technically feasible without touching the user's global configuration. `-c/--config` overrides are TOML-parsed, sit at the HIGHEST configuration-precedence layer (config-basic: "CLI flags and --config overrides" first), accept dotted keys and inline-table values, and `codex exec` supports `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`"), `--ignore-rules`, and `--ephemeral`. The `codex sandbox` subcommand runs arbitrary commands under the same policy engine — provider-free — enabling REAL enforcement verification.
