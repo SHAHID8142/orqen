@@ -365,6 +365,7 @@ Observed evidence (read from GitHub, never assumed):
 | 42348877550 | push 5815d15 (Feature 002 security acceptance) | `failure`, jobs refused | same billing-lock annotation; 0 steps executed — observed and recorded, not a code failure |
 | 42352886260 | push f2b139c (safe Codex adapter completion) | `failure`, jobs refused | same billing-lock annotation; 0 steps executed — observed and recorded, not a code failure |
 | 42354693373 | push 3c76784 (final acceptance hardening) | `failure`, jobs refused | same billing-lock annotation; 0 steps executed — observed and recorded, not a code failure |
+| 42356331451 | push 3f71a0f (preflight safety & test-integrity fix) | `failure`, jobs refused | same billing-lock annotation; 0 steps executed — observed and recorded, not a code failure |
 
 Diagnosis: the workflow file is valid — `actionlint` exit 0, GitHub lists the workflow `active`, and jobs instantiated while runs were still being created — so the blocker is the **GitHub account billing restriction**, not the workflow. Per D-011 the repository stays PUBLIC and no Actions-minute purchases are required development steps; CI is simply recorded as blocked until GitHub permits execution again.
 
