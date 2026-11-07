@@ -21,6 +21,31 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 002 safe Codex adapter completion verification (2026-11-07, local, macOS 27.2 arm64)
+
+**Research correction (vs. D-022):** per-run Codex permissions ARE technically feasible without touching the user's global configuration. `-c/--config` overrides are TOML-parsed, sit at the HIGHEST configuration-precedence layer (config-basic: "CLI flags and --config overrides" first), accept dotted keys and inline-table values, and `codex exec` supports `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`"), `--ignore-rules`, and `--ephemeral`. The `codex sandbox` subcommand runs arbitrary commands under the same policy engine — provider-free — enabling REAL enforcement verification.
+
+| # | Check | Method | Result |
+| --- | --- | --- | --- |
+| 1 | Frontend gates | `npm ci` → `npm run verify` | PASS — **118/118** (new: confirmation card shows the backend-provided enforced restrictions verbatim before the user confirms) |
+| 2 | Rust gates | `npm run rust:fmt` + `npm run rust:clippy` + `npm run rust:check` | PASS — fmt clean; clippy `-D warnings` 0 errors; check clean |
+| 3 | Rust tests | `cargo test` | PASS — **96 lib + 8 sandbox-enforcement (self-skip without a CLI) + 9 execution-integration + 4 persistence-integration** |
+| 4 | Timeout path | `cargo test --features test-timeouts` | PASS — +1 (2 s override deadline, full teardown) |
+| 5 | **REAL sandbox enforcement** | `ORQEN_CODEX_BIN=<codex-cli 0.164.0> cargo test --test codex_sandbox_enforcement` — the PRODUCTION policy builder through `codex sandbox` (same policy engine as `exec`; NO provider contact) | PASS — **8/8**: work-dir read succeeds; protected reads in `$HOME`, `/tmp`, and the macOS per-user temp dir DENIED ("Operation not permitted", content never printed); write outside the work dir DENIED (no file created); write inside succeeds; invalid profile value = hard error; unknown profile selection = hard error; nested `codex sandbox` escalation (danger-full-access inner) cannot execute |
+| 6 | Fallback trap | production args audited + unit test | PASS — no `--sandbox`/`-s`/`sandbox_mode` is ever passed with the permissions profile (mixing silently reverts to the legacy write-only sandbox) |
+| 7 | Inherited-settings bypass | design + evidence | PASS — `--ignore-user-config` + `--ignore-rules` mean NOTHING is inherited (no MCP servers, hooks, plugins, profiles); the per-run random profile name cannot collide with user-config entries; tool-call env = documented core set with credential-shaped names excluded |
+| 8 | Version gate | unit tests + command-gate tests | PASS — CLI < 0.164.0 or unparseable `--version` output fails closed ("does not support the enforced per-run permissions profile"); ledger now records the verified CLI version |
+| 9 | Entry-point audit | grep over `src-tauri/src` | PASS — the ONLY production caller of `RunRegistry::start` is `start_diagnostic_run` (behind `ensure_diagnostic_admissible`: posture + ledger freshness + version); all other callers are tests |
+| 10 | User configuration integrity | design + git diff of `~/.codex` behavior | PASS — nothing writes to `~/.codex/config.toml` or any global setting; no credentials are read or copied (auth resolves inside the CLI from `CODEX_HOME`) |
+| 11 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 12 | Desktop launch probe | `cargo build` + direct launch, observed 12 s | PASS (process level) — alive, 0 error lines |
+| 13 | CI status | GitHub Actions | BLOCKED — EXTERNAL (billing restriction, unchanged) |
+
+**Real-provider status: PARTIAL (unchanged).** No live `codex exec` diagnostic was run — that requires explicit user authorization and consumes quota. What IS verified: the exact policy engine and profile that `exec` will use, verified end-to-end through the `codex sandbox` harness, plus flag-acceptance of the full `exec` invocation. The remaining acceptance step is one user-authorized real-provider diagnostic.
+
+**Windows status: unverified (unchanged).** Codex diagnostics fail closed on all non-macOS platforms until independently verified there.
+
+**What was downloaded/run locally (transparency):** the official `@openai/codex` npm package (version 0.164.0) was executed via `npx` — cache-local, no global install, no PATH change, no configuration change; no provider service was contacted by any automated test (one manual flag-acceptance probe with an EMPTY `CODEX_HOME` reached the API's 401 authentication rejection only — no model call, no quota).
 ## Phase 3 · Feature 002 final security acceptance verification (2026-11-07, local, macOS 27.2 arm64)
 
 | # | Check | Method | Result |

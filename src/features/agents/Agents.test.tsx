@@ -210,6 +210,38 @@ describe("Agents surface — registry display", () => {
     expect(agentsIpc.verify).toHaveBeenCalledWith("codex");
   });
 
+  it("shows the enforced restrictions in the confirmation card for an enabled adapter", async () => {
+    const agentsIpc = makeAgentsIpc();
+    agentsIpc.load.mockResolvedValue([
+      agentRecord({
+        id: "codex",
+        displayName: "OpenAI Codex CLI",
+        discovery: { status: "found", path: "/usr/local/bin/codex" },
+        verification: { status: "verified", version: "codex-cli 0.164.0" },
+        capabilities: {
+          discovery: true,
+          verification: true,
+          execution: true,
+          orchestration: false,
+          diagnosticExecution: true,
+          diagnosticExecutionNote:
+            "Runs noninteractively with an app-owned per-run permissions profile.",
+        },
+      }),
+    ]);
+    const { agentsStore } = renderAgents(agentsIpc);
+    await agentsStore.load();
+
+    agentsStore.requestTestRun("codex");
+    const confirmation = await screen.findByTestId("run-confirmation");
+    // The backend-provided restriction summary must be shown verbatim
+    // before the user confirms.
+    expect(screen.getByTestId("run-restrictions")).toHaveTextContent(
+      "Runs noninteractively with an app-owned per-run permissions profile.",
+    );
+    expect(within(confirmation).getByRole("button", { name: "Confirm & run" })).toBeInTheDocument();
+  });
+
   it("shows a disabled adapter's backend reason instead of a run button", async () => {
     const agentsIpc = makeAgentsIpc();
     agentsIpc.load.mockResolvedValue([

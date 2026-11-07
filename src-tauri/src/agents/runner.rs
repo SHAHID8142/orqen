@@ -596,7 +596,7 @@ fn execute_diagnostic(
     // process group (unix) for whole-tree cancellation.
     let mut command = Command::new(&executable);
     command
-        .args(adapter.build_arguments())
+        .args(adapter.build_arguments(&work_dir))
         .current_dir(&work_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

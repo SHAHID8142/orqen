@@ -131,10 +131,12 @@ pub fn list_agents() -> CommandResult<Vec<AgentStatusDto>> {
 
 /// Backend-authoritative admission gate for a diagnostic run. The UI
 /// confirmation authorizes intent; THIS check authorizes execution:
-/// the adapter must permit safe diagnostics in this build, and a
-/// fresh backend-side verification must exist (the ledger decides —
-/// frontend "Verified" status is never trusted). Returns the verified
-/// executable identity the runner will re-check before spawning.
+/// the adapter must permit safe diagnostics in this build, a fresh
+/// backend-side verification must exist (the ledger decides — frontend
+/// "Verified" status is never trusted), and the verified CLI version
+/// must support the enforced confinement policy (unsupported or
+/// unparseable versions fail closed). Returns the verified executable
+/// identity the runner will re-check before spawning.
 pub fn ensure_diagnostic_admissible(
     definition: &'static crate::agents::definitions::AgentDefinition,
     ledger: &crate::agents::eligibility::EligibilityLedger,
@@ -148,10 +150,29 @@ pub fn ensure_diagnostic_admissible(
     if !adapter.supports_safe_diagnostics() {
         return Err(adapter.unsafe_diagnostics_reason().to_string());
     }
-    ledger.fresh_identity(
+    let identity = ledger.fresh_identity(
         definition.id,
         crate::agents::eligibility::VERIFICATION_FRESHNESS,
-    )
+    )?;
+    if let Some(minimum) = adapter.minimum_cli_version() {
+        let version = ledger
+            .verified_cli_version(definition.id)
+            .unwrap_or_default();
+        if !crate::agents::execution::version_meets_minimum(&version, minimum) {
+            return Err(format!(
+                "the installed \"{}\" CLI ({}) does not support the \
+                 enforced per-run permissions profile — update the CLI \
+                 and verify again.",
+                definition.display_name,
+                if version.is_empty() {
+                    "version unknown"
+                } else {
+                    &version
+                }
+            ));
+        }
+    }
+    Ok(identity)
 }
 
 /// Starts a controlled diagnostic run for one agent. Returns the run id
@@ -274,7 +295,7 @@ pub async fn verify_agent(
 
         status.verification = Some(match verify::verify_cli(&path, verify::DEFAULT_TIMEOUT) {
             Ok(verified) => {
-                if !ledger.record_verified(id, &path) {
+                if !ledger.record_verified(id, &path, Some(&verified.version)) {
                     eprintln!(
                         "orqen agents: could not observe the {id} executable for the eligibility ledger"
                     );
@@ -308,18 +329,18 @@ mod tests {
         assert_eq!(agents.len(), 2);
         assert!(matches!(agents[0].discovery, DiscoveryDto::NotChecked));
         assert!(agents[0].verification.is_none());
-        // Diagnostic execution is implemented but currently DISABLED for
-        // every adapter: no provider offers a per-invocation, verifiable
-        // filesystem read confinement (D-022). The DTO must say so
-        // accurately, with a user-facing reason.
+        // Diagnostic posture is accurate per adapter and per platform
+        // (D-023): Codex is enabled only where its confinement profile is
+        // verified (macOS); Claude Code stays disabled everywhere. Every
+        // adapter surfaces a non-empty user-facing note.
         assert!(agents[0].capabilities.execution);
-        assert!(
-            !agents[0].capabilities.diagnostic_execution,
-            "codex diagnostics must report disabled eligibility"
+        assert_eq!(
+            agents[0].capabilities.diagnostic_execution,
+            cfg!(target_os = "macos")
         );
         assert!(
             !agents[0].capabilities.diagnostic_execution_note.is_empty(),
-            "disabled adapters must surface their reason"
+            "every adapter must surface its posture"
         );
         let claude = agents
             .iter()
@@ -351,38 +372,68 @@ mod tests {
     #[test]
     fn the_admission_gate_rejects_without_backend_authorization() {
         // Direct-IPC bypass proof: even with a valid id, the admission
-        // gate rejects. With every adapter disabled (D-022) the
-        // adapter-posture check fires first; the ledger gate behind it
-        // (unverified / stale) is proven in the eligibility module tests
-        // and consulted in the same call path.
+        // gate rejects without a fresh backend-side verification — the
+        // frontend "Verified" badge alone authorizes nothing.
         let ledger = EligibilityLedger::default();
         let definition = find_definition("codex").expect("definition");
         let error = ensure_diagnostic_admissible(definition, &ledger).expect_err("must reject");
-        assert!(error.contains("disabled"), "got: {error}");
         assert!(
-            ledger
-                .fresh_identity("codex", crate::agents::eligibility::VERIFICATION_FRESHNESS)
-                .is_err()
+            error.contains("has not been verified"),
+            "the ledger gate must fire for an unverified agent: {error}"
         );
+        // Claude Code stays disabled on every platform: the posture gate
+        // fires before the ledger is even consulted.
+        let claude = find_definition("claude-code").expect("definition");
+        let error = ensure_diagnostic_admissible(claude, &ledger).expect_err("must reject");
+        assert!(error.contains("disabled"), "got: {error}");
     }
 
     #[test]
-    fn disabled_adapters_cannot_start_diagnostics_even_when_verified() {
-        // Both adapters are currently disabled (D-022): verification
-        // alone must never authorize a diagnostic.
+    fn verified_supported_codex_is_admissible() {
+        // On the verified platform (macOS), a fresh verification of a
+        // sufficiently new CLI authorizes a diagnostic.
         let ledger = EligibilityLedger::default();
         let dir = std::env::temp_dir().join(format!("orqen-adm-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let tool = dir.join("tool");
+        let tool = dir.join("codex-fixture");
         std::fs::write(&tool, b"binary").expect("fixture");
-        assert!(ledger.record_verified("codex", &tool));
-        assert!(ledger.record_verified("claude-code", &tool));
-
-        for id in ["codex", "claude-code"] {
-            let definition = find_definition(id).expect("definition");
-            let error = ensure_diagnostic_admissible(definition, &ledger)
-                .expect_err("disabled adapter must be rejected");
+        assert!(ledger.record_verified("codex", &tool, Some("codex-cli 0.164.0")));
+        let definition = find_definition("codex").expect("definition");
+        let result = ensure_diagnostic_admissible(definition, &ledger);
+        if cfg!(target_os = "macos") {
+            let identity = result.expect("verified + supported must be admissible");
+            assert_eq!(identity.path, tool);
+        } else {
+            let error = result.expect_err("non-macOS fails closed");
             assert!(error.contains("disabled"), "got: {error}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsupported_cli_versions_fail_closed() {
+        // A verification of an OLD CLI (or one with unparseable version
+        // output) must never authorize a diagnostic for an adapter whose
+        // confinement policy is version-gated.
+        let dir = std::env::temp_dir().join(format!("orqen-adm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let tool = dir.join("codex-fixture");
+        std::fs::write(&tool, b"binary").expect("fixture");
+        for version in [Some("codex-cli 0.163.9"), Some("garbage output"), None] {
+            let fresh = EligibilityLedger::default();
+            assert!(fresh.record_verified("codex", &tool, version));
+            let definition = find_definition("codex").expect("definition");
+            let error = ensure_diagnostic_admissible(definition, &fresh)
+                .expect_err("unsupported version must be rejected");
+            if cfg!(target_os = "macos") {
+                assert!(
+                    error.contains("does not support the enforced per-run permissions profile"),
+                    "version {version:?}: {error}"
+                );
+            } else {
+                // Non-macOS fails closed at the posture gate first.
+                assert!(error.contains("disabled"), "version {version:?}: {error}");
+            }
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -226,6 +226,15 @@ function AgentTestRunSection() {
             — this will contact the provider&apos;s service and may consume
             your account quota or credits.
           </p>
+          {(() => {
+            const selected = agents.records.find((r) => r.id === run.agentId);
+            const note = selected?.capabilities.diagnosticExecutionNote;
+            return note ? (
+              <p className="option-note" data-testid="run-restrictions">
+                Enforced restrictions: {note}
+              </p>
+            ) : null;
+          })()}
           <div className="confirm-actions">
             <button
               type="button"

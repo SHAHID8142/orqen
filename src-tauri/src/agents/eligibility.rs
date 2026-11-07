@@ -69,23 +69,32 @@ impl ExecutableIdentity {
     }
 }
 
+/// One ledger record: the identity observed at verification time, the
+/// CLI version that verification reported, and when it happened.
+type LedgerRecord = (ExecutableIdentity, Option<String>, Instant);
+
 /// Cheaply clonable (shared inner state) so async commands can move a
 /// clone into `spawn_blocking` workers.
 #[derive(Clone, Default)]
 pub struct EligibilityLedger {
-    /// agent id → (identity observed at verification time, when).
-    records: Arc<Mutex<HashMap<String, (ExecutableIdentity, Instant)>>>,
+    /// agent id → verification record.
+    records: Arc<Mutex<HashMap<String, LedgerRecord>>>,
 }
 
 impl EligibilityLedger {
     /// Records a successful backend-side verification of `agent_id`'s
-    /// executable. Returns false (and records nothing) when the file
-    /// could not be observed — there is nothing to bind authorization to.
-    pub fn record_verified(&self, agent_id: &str, path: &Path) -> bool {
+    /// executable. `cli_version` is the raw `--version` output (used by
+    /// the version gate). Returns false (and records nothing) when the
+    /// file could not be observed — there is nothing to bind
+    /// authorization to.
+    pub fn record_verified(&self, agent_id: &str, path: &Path, cli_version: Option<&str>) -> bool {
         match ExecutableIdentity::observe(path) {
             Some(identity) => {
                 if let Ok(mut records) = self.records.lock() {
-                    records.insert(agent_id.to_string(), (identity, Instant::now()));
+                    records.insert(
+                        agent_id.to_string(),
+                        (identity, cli_version.map(str::to_string), Instant::now()),
+                    );
                     true
                 } else {
                     false
@@ -103,6 +112,14 @@ impl EligibilityLedger {
         }
     }
 
+    /// The CLI version recorded by the most recent verification, if any.
+    pub fn verified_cli_version(&self, agent_id: &str) -> Option<String> {
+        let records = self.records.lock().expect("eligibility ledger lock");
+        records
+            .get(agent_id)
+            .and_then(|(_, version, _)| version.clone())
+    }
+
     /// Returns the verified executable identity when a verification
     /// exists AND is fresh under `freshness`. The caller passes its
     /// policy window (production uses `VERIFICATION_FRESHNESS`).
@@ -112,7 +129,7 @@ impl EligibilityLedger {
         freshness: Duration,
     ) -> Result<ExecutableIdentity, String> {
         let records = self.records.lock().expect("eligibility ledger lock");
-        let (identity, verified_at) = records.get(agent_id).ok_or_else(|| {
+        let (identity, _, verified_at) = records.get(agent_id).ok_or_else(|| {
             format!(
                 "\"{agent_id}\" has not been verified in this session — \
                  run Verify first; the backend decides execution \
@@ -196,7 +213,7 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("tool");
         write_file(&path, b"binary");
-        assert!(ledger.record_verified("codex", &path));
+        assert!(ledger.record_verified("codex", &path, Some("codex-cli 0.164.0")));
 
         let identity = ledger
             .fresh_identity("codex", VERIFICATION_FRESHNESS)
@@ -212,7 +229,7 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("tool");
         write_file(&path, b"binary");
-        assert!(ledger.record_verified("codex", &path));
+        assert!(ledger.record_verified("codex", &path, Some("codex-cli 0.164.0")));
 
         // The freshness window is a policy parameter: a zero window makes
         // any recorded verification stale (bounded-freshness proof).
@@ -229,7 +246,7 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("tool");
         write_file(&path, b"binary");
-        assert!(ledger.record_verified("codex", &path));
+        assert!(ledger.record_verified("codex", &path, Some("codex-cli 0.164.0")));
         ledger.clear("codex");
         assert!(
             ledger
@@ -242,7 +259,7 @@ mod tests {
     #[test]
     fn unobservable_files_are_never_recorded() {
         let ledger = EligibilityLedger::default();
-        assert!(!ledger.record_verified("codex", Path::new("/nonexistent/orqen-tool")));
+        assert!(!ledger.record_verified("codex", Path::new("/nonexistent/orqen-tool"), None));
         assert!(
             ledger
                 .fresh_identity("codex", VERIFICATION_FRESHNESS)

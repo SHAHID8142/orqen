@@ -9,17 +9,25 @@
 //!   the process arguments.
 //! - The diagnostic runs in an application-managed, isolated working
 //!   directory that contains no user project data.
-//! - Each adapter documents its provider's least-privilege settings;
-//!   an adapter that cannot establish adequate restrictions must report
+//! - Each adapter owns its per-run confinement policy; an adapter that
+//!   cannot establish and verify adequate restrictions must report
 //!   `supports_safe_diagnostics() == false` and stay disabled.
 //! - Authentication always comes from the CLI's own configuration; no
 //!   credentials are read, stored, or logged.
+
+use std::path::Path;
 
 /// The fixed diagnostic prompt. Deliberately not configurable: this
 /// feature validates the execution architecture, not the model.
 pub const DIAGNOSTIC_PROMPT: &str = "Respond with a short confirmation that \
 the agent is available. Do not read, modify, create, or delete any local \
 project files.";
+
+/// The minimum Codex CLI version for which the per-run read-confinement
+/// profile is VERIFIED (0.164.0 — the version used for the enforcement
+/// evidence in docs/QA_REPORT.md). Older versions fail closed at the
+/// eligibility gate: they must never receive a diagnostic.
+pub const CODEX_MINIMUM_VERSION: (u64, u64, u64) = (0, 164, 0);
 
 /// Adapter contract: how one supported CLI is invoked noninteractively.
 ///
@@ -29,12 +37,18 @@ pub trait ExecutionAdapter: Send + Sync {
     /// Stable id — matches the registry definition id.
     fn id(&self) -> &'static str;
     /// The noninteractive argument list AFTER the executable. Built from
-    /// compile-time constants and the fixed diagnostic prompt only.
-    fn build_arguments(&self) -> Vec<String>;
+    /// compile-time constants, the fixed diagnostic prompt, and the
+    /// adapter's own per-run confinement policy for `work_dir`.
+    fn build_arguments(&self, work_dir: &Path) -> Vec<String>;
     /// Whether this adapter's invocation establishes adequate
     /// least-privilege restrictions for a diagnostic run. Adapters that
     /// cannot must report false and stay disabled.
     fn supports_safe_diagnostics(&self) -> bool;
+    /// The minimum CLI version the confinement policy requires, when the
+    /// policy is version-gated. `None` — no version gate.
+    fn minimum_cli_version(&self) -> Option<(u64, u64, u64)> {
+        None
+    }
     /// Short human-readable summary of the applied restrictions.
     fn restriction_summary(&self) -> &'static str;
     /// Why safe diagnostics are not supported (empty string when they
@@ -54,21 +68,117 @@ pub trait ExecutionAdapter: Send + Sync {
     ) -> Result<String, String>;
 }
 
-/// OpenAI Codex CLI: `codex exec` is the documented noninteractive mode;
-/// `--sandbox read-only` is the documented least-privilege WRITE setting;
-/// `--skip-git-repo-check` is required because the isolated working
-/// directory is not a git repository.
+/// Quotes a string as a TOML basic string (the `-c` override values are
+/// parsed as TOML).
+fn toml_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Extracts a (major, minor, patch) triple from a `--version` output
+/// such as `codex-cli 0.164.0`. `None` when no version token exists —
+/// the caller must fail closed.
+fn parse_semver_triple(version_output: &str) -> Option<(u64, u64, u64)> {
+    version_output.split_whitespace().find_map(|token| {
+        let mut parts = token.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next().unwrap_or("0").parse().ok()?;
+        Some((major, minor, patch))
+    })
+}
+
+/// Whether a `--version` output denotes a CLI at least `minimum`.
+/// Unparseable output fails closed (false).
+pub fn version_meets_minimum(version_output: &str, minimum: (u64, u64, u64)) -> bool {
+    parse_semver_triple(version_output)
+        .map(|triple| triple >= minimum)
+        .unwrap_or(false)
+}
+
+/// The per-run confinement policy for one Codex diagnostic: the `-c`
+/// overrides that DEFINE an app-owned, read-deny-by-default permissions
+/// profile and SELECT it for this invocation only.
 ///
-/// Diagnostic execution is currently DISABLED for this adapter: the
-/// documented sandbox bounds WRITES only — reads are not restricted to
-/// the working directory, so confidentiality is not enforced. The newer
-/// permissions profiles (`permissions.<name>.filesystem`, default-deny
-/// for ungranted paths) could restrict reads, but they are config-file
-/// constructs selected via the top-level `default_permissions` key with
-/// no documented per-invocation flag — applying one would require
-/// modifying the user's global Codex configuration and is version-gated
-/// (~0.138+), so confinement cannot be established and verified across
-/// CLI versions. See docs/ARCHITECTURE.md and docs/DECISIONS.md (D-022).
+/// Guarantees (verified on macOS Seatbelt, codex-cli 0.164.0 — see
+/// docs/QA_REPORT.md):
+/// - filesystem reads are denied everywhere except the platform/runtime
+///   paths covered by the documented `:minimal` token and the diagnostic
+///   directory; `/tmp` is explicitly re-denied (it leaks through
+///   `:minimal`);
+/// - filesystem writes are granted ONLY inside the diagnostic directory;
+/// - the profile name carries a per-run random suffix, so it can never
+///   collide with an entry in the user's global configuration — nothing
+///   is read from or written to the user's configuration, and no
+///   inherited profile can broaden this one;
+/// - nothing here passes `--sandbox`/`sandbox_mode`: mixing those with
+///   permissions profiles makes Codex silently fall back to the legacy
+///   (write-only) sandbox, which would defeat read confinement.
+pub struct CodexRunPolicy {
+    /// `-c key=value` overrides to place on the `codex` invocation.
+    pub config_overrides: Vec<String>,
+    /// The profile name, for tooling that selects a profile explicitly
+    /// (`codex sandbox -P <name>` — used by the enforcement tests).
+    pub profile_name: String,
+}
+
+/// Builds the confinement policy for one diagnostic run. The user's
+/// global configuration is never modified.
+pub fn codex_diagnostic_run_policy(work_dir: &Path) -> CodexRunPolicy {
+    // Per-run random suffix: a static name could collide with an
+    // entry the user's global configuration defines, and (because a
+    // more-specific rule can reopen a broader deny) such a collision
+    // could GRANT reads. A fresh random name makes that impossible.
+    let profile_name = format!(
+        "orqen-diag-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+    let work_dir_toml = toml_quote(&work_dir.to_string_lossy());
+    let profile_definition = format!(
+        "permissions.{profile_name}={{filesystem={{\":root\"=\"deny\",\
+         \":minimal\"=\"read\",\"/tmp\"=\"deny\",{work_dir_toml}=\"write\"}}}}",
+        profile_name = profile_name,
+    );
+    CodexRunPolicy {
+        config_overrides: vec![
+            profile_definition,
+            format!("default_permissions={}", toml_quote(&profile_name)),
+            // Tool-call children get only the documented core environment
+            // (PATH-like basics), never arbitrary inherited variables that
+            // could carry credentials, and credential-shaped names are
+            // excluded even from that.
+            "shell_environment_policy.inherit=\"core\"".to_string(),
+            "shell_environment_policy.exclude=[\"*KEY*\",\"*TOKEN*\",\"*SECRET*\",\"*PASSWORD*\",\"*CREDENTIAL*\"]"
+                .to_string(),
+        ],
+        profile_name,
+    }
+}
+
+/// OpenAI Codex CLI: `codex exec` is the documented noninteractive mode.
+///
+/// Per-run confinement (D-023): the invocation loads NONE of the user's
+/// configuration (`--ignore-user-config` — auth still resolves from
+/// `CODEX_HOME`), loads no execpolicy rules (`--ignore-rules`), persists
+/// no session files (`--ephemeral`), and applies an app-owned,
+/// read-deny-by-default permissions profile defined entirely via `-c`
+/// overrides (the highest-precedence configuration layer). The legacy
+/// `--sandbox` flag is deliberately NOT passed: mixing it with a
+/// permissions profile silently reverts to the legacy write-only
+/// sandbox.
+///
+/// Verified on macOS Seatbelt (codex-cli 0.164.0, `codex sandbox`
+/// enforcement harness — see docs/QA_REPORT.md). Other platforms fail
+/// closed until independently verified there.
 pub struct CodexAdapter;
 
 impl ExecutionAdapter for CodexAdapter {
@@ -76,32 +186,59 @@ impl ExecutionAdapter for CodexAdapter {
         "codex"
     }
 
-    fn build_arguments(&self) -> Vec<String> {
-        vec![
+    fn build_arguments(&self, work_dir: &Path) -> Vec<String> {
+        let policy = codex_diagnostic_run_policy(work_dir);
+        let mut args = vec![
             "exec".to_string(),
-            "--sandbox".to_string(),
-            "read-only".to_string(),
+            // Nothing inherited: no MCP servers, hooks, plugins, model
+            // providers, or profiles from the user's configuration.
+            "--ignore-user-config".to_string(),
+            "--ignore-rules".to_string(),
+            "--ephemeral".to_string(),
+            // The isolated working directory is not a git repository.
             "--skip-git-repo-check".to_string(),
-            DIAGNOSTIC_PROMPT.to_string(),
-        ]
+        ];
+        // Each override is its own `-c key=value` pair.
+        args.extend(
+            policy
+                .config_overrides
+                .iter()
+                .flat_map(|override_value| ["-c".to_string(), override_value.clone()]),
+        );
+        args.push(DIAGNOSTIC_PROMPT.to_string());
+        args
     }
 
     fn supports_safe_diagnostics(&self) -> bool {
-        false
+        // The read-confinement profile is VERIFIED on macOS Seatbelt
+        // only (D-023). Linux (Landlock/bubblewrap) and Windows
+        // enforcement are not verified — fail closed there.
+        cfg!(target_os = "macos")
+    }
+
+    fn minimum_cli_version(&self) -> Option<(u64, u64, u64)> {
+        Some(CODEX_MINIMUM_VERSION)
     }
 
     fn unsafe_diagnostics_reason(&self) -> &'static str {
-        "diagnostic execution for Codex is disabled: the documented \
-         sandbox bounds writes only and does not restrict filesystem \
-         reads to the working directory, and the permissions profiles \
-         that could restrict reads require modifying the user's global \
-         CLI configuration with no documented per-invocation flag"
+        if cfg!(target_os = "macos") {
+            ""
+        } else {
+            "diagnostic execution for Codex is disabled on this platform: \
+             the per-run read-confinement profile is verified on macOS \
+             (Seatbelt) only — enforcement here is unverified, so the \
+             adapter fails closed"
+        }
     }
 
     fn restriction_summary(&self) -> &'static str {
-        "Diagnostic execution is disabled: read confinement cannot be \
-         enforced per invocation without modifying the user's global \
-         CLI configuration."
+        "Runs noninteractively with an app-owned per-run permissions \
+         profile: filesystem reads and writes are denied outside the \
+         diagnostic directory (platform/runtime paths stay readable; \
+         /tmp is explicitly denied), tool-call network access is \
+         restricted, the tool-call environment carries no arbitrary \
+         inherited variables, and your global Codex configuration is \
+         not loaded."
     }
 
     fn parse_result(
@@ -173,7 +310,7 @@ impl ExecutionAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 
-    fn build_arguments(&self) -> Vec<String> {
+    fn build_arguments(&self, _work_dir: &Path) -> Vec<String> {
         vec![
             "-p".to_string(),
             DIAGNOSTIC_PROMPT.to_string(),
@@ -290,6 +427,10 @@ pub fn diagnostic_prompt() -> &'static str {
 mod tests {
     use super::*;
 
+    fn any_work_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join("orqen-adapter-test-workdir")
+    }
+
     #[test]
     fn adapters_match_registry_ids() {
         assert_eq!(CodexAdapter.id(), "codex");
@@ -300,26 +441,176 @@ mod tests {
     }
 
     #[test]
-    fn codex_uses_documented_noninteractive_invocation() {
-        let args = CodexAdapter.build_arguments();
+    fn codex_invocation_loads_no_user_config_and_applies_the_confinement_profile() {
+        let args = CodexAdapter.build_arguments(&any_work_dir());
         assert_eq!(args[0], "exec", "codex exec is the noninteractive mode");
+        // Nothing inherited: no MCP servers, hooks, plugins, profiles.
         assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--sandbox" && w[1] == "read-only"),
-            "the documented read-only sandbox must be applied: {args:?}"
+            args.iter().any(|a| a == "--ignore-user-config"),
+            "the user's global configuration must not be loaded: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--ignore-rules"));
+        assert!(args.iter().any(|a| a == "--ephemeral"));
+        assert!(args.iter().any(|a| a == "--skip-git-repo-check"));
+
+        // FALLBACK GUARD: mixing --sandbox/sandbox_mode with a permissions
+        // profile makes Codex silently use the legacy write-only sandbox,
+        // defeating read confinement. The flag must never be present.
+        assert!(
+            !args.iter().any(|a| a == "--sandbox" || a == "-s"),
+            "the legacy sandbox flag must not be passed: {args:?}"
         );
         assert!(
-            args.iter().any(|a| a == "--skip-git-repo-check"),
-            "the isolated working directory is not a git repository"
+            !args.iter().any(|a| a.starts_with("sandbox_mode=")),
+            "sandbox_mode must not be set: {args:?}"
         );
-        assert!(args.last().expect("prompt") == super::super::execution::DIAGNOSTIC_PROMPT);
+
+        // The profile: read-deny-by-default with only the documented
+        // runtime token and the work dir granted.
+        let profile_def = args
+            .iter()
+            .find(|a| a.starts_with("permissions.orqen-diag-"))
+            .expect("the app-owned profile must be defined via -c");
+        assert!(
+            profile_def.contains("\":root\"=\"deny\""),
+            "reads must be denied by default: {profile_def}"
+        );
+        assert!(
+            profile_def.contains("\":minimal\"=\"read\""),
+            "the documented runtime token must be granted: {profile_def}"
+        );
+        assert!(
+            profile_def.contains("\"/tmp\"=\"deny\""),
+            "/tmp leaks through :minimal and must be re-denied: {profile_def}"
+        );
+        assert!(
+            profile_def.contains("=\"write\""),
+            "the work dir must be writable: {profile_def}"
+        );
+        // The work dir grant quotes the path (spaces survive as one -c
+        // value; TOML basic-string escaping applies).
+        let work_dir_quoted = toml_quote(&any_work_dir().to_string_lossy());
+        assert!(
+            profile_def.contains(&format!("{work_dir_quoted}=\"write\"")),
+            "the grant must bind to THIS run's work dir: {profile_def}"
+        );
+        // Selection: the same profile is selected as the default.
+        let selection = args
+            .iter()
+            .find(|a| a.starts_with("default_permissions="))
+            .expect("the profile must be selected");
+        let name = profile_def
+            .trim_start_matches("permissions.")
+            .split('=')
+            .next()
+            .unwrap_or("");
+        assert_eq!(
+            selection.as_str(),
+            format!("default_permissions={}", toml_quote(name)),
+            "the selected profile must be the defined one"
+        );
+
+        // The environment passed to tool-call children is restricted.
+        assert!(
+            args.iter()
+                .any(|a| a == "shell_environment_policy.inherit=\"core\""),
+            "tool-call env must be the documented core set: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("shell_environment_policy.exclude=")),
+            "credential-shaped env names must be excluded: {args:?}"
+        );
+
+        // The prompt is the final argument.
+        assert_eq!(args.last().expect("prompt"), DIAGNOSTIC_PROMPT);
+    }
+
+    #[test]
+    fn the_confinement_profile_name_is_random_per_run() {
+        let first = codex_diagnostic_run_policy(&any_work_dir()).profile_name;
+        let second = codex_diagnostic_run_policy(&any_work_dir()).profile_name;
+        assert_ne!(
+            first, second,
+            "a per-run random name makes collisions with the user's global configuration impossible"
+        );
+        assert!(first.starts_with("orqen-diag-"));
+    }
+
+    #[test]
+    fn toml_quote_escapes_special_characters() {
+        assert_eq!(toml_quote("/tmp/a"), "\"/tmp/a\"");
+        assert_eq!(toml_quote("/a \"b\""), "\"/a \\\"b\\\"\"");
+        assert_eq!(toml_quote("back\\slash"), "\"back\\\\slash\"");
+        // A path with spaces stays a single quoted TOML string.
+        assert_eq!(
+            toml_quote("/Users/x/Application Support/dir"),
+            "\"/Users/x/Application Support/dir\""
+        );
+    }
+
+    #[test]
+    fn version_gate_fails_closed() {
+        assert!(version_meets_minimum(
+            "codex-cli 0.164.0",
+            CODEX_MINIMUM_VERSION
+        ));
+        assert!(version_meets_minimum(
+            "codex-cli 0.165.1",
+            CODEX_MINIMUM_VERSION
+        ));
+        assert!(version_meets_minimum(
+            "codex-cli 1.0.0",
+            CODEX_MINIMUM_VERSION
+        ));
+        assert!(
+            !version_meets_minimum("codex-cli 0.163.9", CODEX_MINIMUM_VERSION),
+            "versions below the verified minimum must fail closed"
+        );
+        assert!(
+            !version_meets_minimum("", CODEX_MINIMUM_VERSION),
+            "unparseable output must fail closed"
+        );
+        assert!(!version_meets_minimum("unknown", CODEX_MINIMUM_VERSION));
+        assert!(CodexAdapter.minimum_cli_version().is_some());
+        // Claude stays disabled and has no version gate to bypass into.
+        assert!(ClaudeCodeAdapter.minimum_cli_version().is_none());
+    }
+
+    #[test]
+    fn adapter_posture_matches_verified_platforms() {
+        // Codex is enabled ONLY where the confinement profile was
+        // independently verified (macOS Seatbelt, D-023); everywhere else
+        // it must report disabled with an accurate reason.
+        assert_eq!(
+            CodexAdapter.supports_safe_diagnostics(),
+            cfg!(target_os = "macos")
+        );
+        if CodexAdapter.supports_safe_diagnostics() {
+            assert!(CodexAdapter.unsafe_diagnostics_reason().is_empty());
+        } else {
+            assert!(
+                CodexAdapter
+                    .unsafe_diagnostics_reason()
+                    .contains("disabled")
+            );
+        }
+        // Claude Code remains disabled on every platform until
+        // independently reviewed.
+        assert!(!ClaudeCodeAdapter.supports_safe_diagnostics());
+        assert!(
+            ClaudeCodeAdapter
+                .unsafe_diagnostics_reason()
+                .contains("disabled")
+        );
+        assert!(ClaudeCodeAdapter.restriction_summary().contains("disabled"));
     }
 
     #[test]
     fn claude_uses_documented_print_mode_with_denied_mutating_tools() {
-        let args = ClaudeCodeAdapter.build_arguments();
+        let args = ClaudeCodeAdapter.build_arguments(&any_work_dir());
         assert_eq!(args[0], "-p", "print mode is the noninteractive mode");
-        assert!(args.contains(&super::super::execution::DIAGNOSTIC_PROMPT.to_string()));
+        assert!(args.contains(&DIAGNOSTIC_PROMPT.to_string()));
         let deny_position = args
             .iter()
             .position(|a| a == "--disallowedTools")
@@ -330,43 +621,6 @@ mod tests {
                 .all(|tool| matches!(tool, "Bash" | "Edit" | "Write" | "NotebookEdit")),
             "only known mutating tools may be denied: {:?}",
             args
-        );
-    }
-
-    #[test]
-    fn no_adapter_claims_unenforceable_isolation() {
-        // Confidentiality isolation is NOT enforceable per invocation for
-        // either provider without modifying the user's global CLI config:
-        // Codex's documented sandbox bounds writes only (reads are
-        // unrestricted; the read-restricting permissions profiles are
-        // config-file constructs with no per-invocation flag, D-022), and
-        // Claude Code inherits the user's global configuration. Both
-        // adapters must therefore report disabled with an accurate,
-        // user-facing reason — an enabled adapter must never claim
-        // stronger filesystem isolation than it enforces.
-        assert!(!CodexAdapter.supports_safe_diagnostics());
-        assert!(!ClaudeCodeAdapter.supports_safe_diagnostics());
-        for reason in [
-            CodexAdapter.unsafe_diagnostics_reason(),
-            ClaudeCodeAdapter.unsafe_diagnostics_reason(),
-        ] {
-            assert!(!reason.is_empty(), "disabled adapters need a reason");
-            assert!(reason.contains("disabled"), "reason: {reason}");
-        }
-        for summary in [
-            CodexAdapter.restriction_summary(),
-            ClaudeCodeAdapter.restriction_summary(),
-        ] {
-            assert!(summary.contains("disabled"), "summary: {summary}");
-        }
-        // The documented least-privilege arguments are retained for a
-        // future re-enable, but they must never be presented as read
-        // confinement.
-        assert!(
-            CodexAdapter
-                .build_arguments()
-                .windows(2)
-                .any(|w| w[0] == "--sandbox" && w[1] == "read-only")
         );
     }
 
@@ -434,8 +688,8 @@ mod tests {
         assert!(prompt.contains("Do not read, modify, create, or delete"));
         // The prompt must be identical for every adapter (no per-provider
         // prompt drift in the diagnostic).
-        let codex_args = CodexAdapter.build_arguments();
-        let claude_args = ClaudeCodeAdapter.build_arguments();
+        let codex_args = CodexAdapter.build_arguments(&any_work_dir());
+        let claude_args = ClaudeCodeAdapter.build_arguments(&any_work_dir());
         assert_eq!(codex_args.last().expect("codex prompt"), prompt);
         assert!(claude_args.contains(&prompt.to_string()));
     }
