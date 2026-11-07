@@ -57,7 +57,8 @@ static READER_SLOTS: std::sync::Mutex<usize> = std::sync::Mutex::new(MAX_CONCURR
 /// RAII reservation of one reader slot. Moving it into a reader thread
 /// transfers ownership; the slot returns to the pool exactly when the
 /// thread (and its reader) terminates. Not `Clone` — exactly one drop.
-struct ReaderSlot;
+/// Public so the diagnostic runner can hold its stdout/stderr permits.
+pub struct ReaderSlot;
 
 impl Drop for ReaderSlot {
     fn drop(&mut self) {
@@ -69,7 +70,7 @@ impl Drop for ReaderSlot {
 }
 
 /// Atomically reserves one reader slot, if capacity remains.
-fn try_acquire_reader_slot() -> Option<ReaderSlot> {
+pub fn try_acquire_reader_slot() -> Option<ReaderSlot> {
     let mut available = READER_SLOTS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -82,7 +83,7 @@ fn try_acquire_reader_slot() -> Option<ReaderSlot> {
 
 /// Reserves a matched pair of slots (stdout + stderr), or none at all —
 /// a probe is never started with only one of its two readers.
-fn acquire_reader_slot_pair() -> Option<(ReaderSlot, ReaderSlot)> {
+pub fn acquire_reader_slot_pair() -> Option<(ReaderSlot, ReaderSlot)> {
     let first = try_acquire_reader_slot()?;
     // On failure the first permit is released by its own Drop on this path.
     try_acquire_reader_slot().map(|second| (first, second))

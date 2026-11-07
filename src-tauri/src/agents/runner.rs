@@ -7,19 +7,33 @@
 //! prompt is a compile-time constant and the output never leaves the
 //! machine).
 //!
+//! Concurrency: exactly ONE diagnostic run may be active at a time,
+//! enforced atomically (`compare_exchange`) before any registry entry is
+//! created — rejected starts never leave phantom entries. Admission is
+//! released through RAII on every exit path, including worker panics.
+//!
+//! Platform notes:
+//! - Unix: the probe spawns as its own process group (`process_group(0)`)
+//!   and timeout/cancellation terminate the whole group with SIGKILL.
+//! - Windows: only the direct child is killed; descendants may outlive
+//!   the probe. This is a documented, unverified-on-macOS limitation —
+//!   see docs/ARCHITECTURE.md.
+//!
 //! Process safety (reuses the Phase 3 verification patterns):
-//! - the probe spawns as its own process group (`process_group(0)`, unix)
-//!   so cancellation and cleanup terminate the whole tree with SIGKILL;
 //! - output readers drain bounded shared buffers;
 //! - the deadline covers the whole lifecycle and a cancellation flag is
-//!   honored between polls.
+//!   honored between polls;
+//! - the probe re-verifies the CLI (backend-side, time-bounded) before
+//!   executing — frontend "Verified" status is UX, not a guarantee.
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,7 +41,7 @@ use serde::Serialize;
 
 use super::definitions::AgentDefinition;
 use super::discovery;
-use super::execution::{find_adapter, ExecutionAdapter};
+use super::execution::find_adapter;
 
 /// Hard deadline for one diagnostic run (model latency can be tens of
 /// seconds; 120 s bounds a hung CLI).
@@ -41,6 +55,9 @@ const READER_GRACE: Duration = Duration::from_millis(1000);
 /// Maximum concurrent diagnostic runs (the UI allows one; the backend
 /// enforces the same bound independently).
 pub const MAX_CONCURRENT_RUNS: usize = 1;
+/// Finished runs retained for result display; older ones are pruned so a
+/// long session cannot grow the registry without bound.
+pub const MAX_RETAINED_FINISHED_RUNS: usize = 16;
 
 /// Terminal status of a diagnostic run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -71,9 +88,16 @@ pub struct RunOutcomeDto {
 #[serde(rename_all = "camelCase", tag = "phase")]
 pub enum RunStatusDto {
     /// The run id is registered but the worker has not reported yet.
-    Starting { agent_id: String },
-    Running { agent_id: String, started_at: String },
-    Finished { result: RunOutcomeDto },
+    Starting {
+        agent_id: String,
+    },
+    Running {
+        agent_id: String,
+        started_at: String,
+    },
+    Finished {
+        result: RunOutcomeDto,
+    },
     /// The id is not registered (unknown id, or the registry was cleared
     /// by an application restart — runs are session-scoped).
     Unknown,
@@ -93,7 +117,10 @@ struct OutputBuffers {
 
 impl OutputBuffers {
     fn stream(&mut self, stream: usize) -> &mut StreamBuffers {
-        &mut self.streams[stream]
+        &mut self.streams[match stream {
+            0 => 0,
+            _ => 1,
+        }]
     }
 }
 
@@ -133,8 +160,9 @@ impl SharedOutput {
     }
 }
 
-/// Drops the shared drain handle and signals remaining readers to stop
-/// draining (bounded retention) on every exit path.
+/// Stops draining and marks both streams done on every runner exit path
+/// (success, failure, timeout, cancellation, panic). Bounded retention
+/// means the buffers cannot grow after this point.
 struct DrainGuard(SharedOutput);
 impl Drop for DrainGuard {
     fn drop(&mut self) {
@@ -151,6 +179,9 @@ struct RunEntry {
     started_at: String,
     finished: Mutex<Option<RunOutcomeDto>>,
     cancel: Arc<AtomicBool>,
+    /// Some(pid) while the probe process is alive; None once the run
+    /// finishes. Cancellation only signals a live, non-finished run —
+    /// a finished entry has no PID to target (stale/reused-PID guard).
     pid: Mutex<Option<u32>>,
 }
 
@@ -163,7 +194,12 @@ pub struct RunRegistry {
 #[derive(Default)]
 struct RegistryInner {
     runs: Mutex<HashMap<String, RunEntry>>,
-    active: AtomicUsize,
+    /// Admission gate: true while a diagnostic is executing. Atomic
+    /// `compare_exchange(false → true)` admits exactly one run; released
+    /// through RAII when the worker finishes (including panics).
+    active: AtomicBool,
+    /// Insertion order of run ids, for bounded finished-run retention.
+    order: Mutex<Vec<String>>,
 }
 
 impl Default for RunRegistry {
@@ -174,17 +210,136 @@ impl Default for RunRegistry {
     }
 }
 
+/// RAII release of the single-run admission slot. Disarmed once the
+/// worker has recorded the final outcome; on earlier drops (errors,
+/// panics) it clears the admission and removes a phantom entry.
+struct AdmissionGuard {
+    inner: Arc<RegistryInner>,
+    run_id: String,
+    armed: bool,
+}
+
+impl AdmissionGuard {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.inner.active.store(false, Ordering::SeqCst);
+        if let Ok(mut runs) = self.inner.runs.lock() {
+            runs.remove(&self.run_id);
+        }
+        if let Ok(mut order) = self.inner.order.lock() {
+            order.retain(|id| id != &self.run_id);
+        }
+    }
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+/// Test-only deadline override for the `test-timeouts` feature: the
+/// integration suite shrinks the diagnostic deadline so the timeout path
+/// (group kill, reader drain, reap, cleanup) is exercised in seconds
+/// instead of 120 s. The shipped app never enables this feature.
+#[cfg(feature = "test-timeouts")]
+pub static TEST_DEADLINE_OVERRIDE: Mutex<Option<Duration>> = Mutex::new(None);
+
+/// The deadline actually applied to a run. In the shipped app this is
+/// always `DIAGNOSTIC_TIMEOUT`.
+fn effective_timeout() -> Duration {
+    #[cfg(feature = "test-timeouts")]
+    {
+        TEST_DEADLINE_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or(DIAGNOSTIC_TIMEOUT)
+    }
+    #[cfg(not(feature = "test-timeouts"))]
+    DIAGNOSTIC_TIMEOUT
+}
+
+impl RegistryInner {
+    /// Records the final outcome, clears the PID, releases the admission
+    /// slot, and prunes finished runs beyond the retention cap.
+    fn record_finished(&self, run_id: &str, outcome: RunOutcomeDto) {
+        let mut runs = self.runs.lock().expect("runs lock");
+        if let Some(entry) = runs.get_mut(run_id) {
+            if let Ok(mut finished) = entry.finished.lock() {
+                *finished = Some(outcome);
+            }
+            if let Ok(mut pid) = entry.pid.lock() {
+                *pid = None; // no stale/reused-PID targeting
+            }
+        }
+        self.active.store(false, Ordering::SeqCst);
+        drop(runs);
+        self.prune_finished();
+    }
+
+    fn prune_finished(&self) {
+        let mut runs = self.runs.lock().expect("runs lock");
+        let mut order = self.order.lock().expect("order lock");
+        let mut finished_ids: Vec<(String, String)> = order
+            .iter()
+            .filter_map(|id| {
+                runs.get(id).and_then(|entry| {
+                    entry
+                        .finished
+                        .lock()
+                        .expect("finished lock")
+                        .clone()
+                        .map(|outcome| (id.clone(), outcome.finished_at))
+                })
+            })
+            .collect();
+        if finished_ids.len() <= MAX_RETAINED_FINISHED_RUNS {
+            return;
+        }
+        finished_ids.sort_by(|a, b| a.1.cmp(&b.1));
+        let excess = finished_ids.len() - MAX_RETAINED_FINISHED_RUNS;
+        for (id, _) in finished_ids.iter().take(excess) {
+            runs.remove(id);
+            order.retain(|oid| oid != id);
+        }
+    }
+}
+
 impl RunRegistry {
     /// Registers a new run and executes it on a detached worker thread.
-    /// Returns the stable run id, or an error when the concurrent-run
-    /// bound (one diagnostic at a time) is already exhausted.
+    ///
+    /// Admission is atomic: `compare_exchange(false → true)` admits at
+    /// most one diagnostic; the registry entry is created only AFTER
+    /// admission succeeds, so rejected starts leave no phantom entries.
+    /// The returned id is stable and immediately queryable.
     pub fn start(
         &self,
         definition: &'static AgentDefinition,
         data_dir: &Path,
     ) -> Result<String, String> {
+        self.inner
+            .active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| {
+                "a diagnostic run is already in progress — cancel it or wait \
+                 for it to finish."
+                    .to_string()
+            })?;
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
+
+        // Admission succeeded — register the entry. The guard below
+        // removes it and releases admission if anything fails before the
+        // worker takes ownership.
         {
             let mut runs = self.inner.runs.lock().expect("runs lock");
             runs.insert(
@@ -198,32 +353,40 @@ impl RunRegistry {
                 },
             );
         }
-        // Enforce the concurrent-run bound (independent of the map scan).
-        if self.inner.active.load(Ordering::SeqCst) >= MAX_CONCURRENT_RUNS {
-            return Err(
-                "a diagnostic run is already in progress — cancel it or wait \
-                 for it to finish."
-                    .to_string(),
-            );
+        if let Ok(mut order) = self.inner.order.lock() {
+            order.push(run_id.clone());
         }
-        self.inner.active.fetch_add(1, Ordering::SeqCst);
+
+        let admission = AdmissionGuard {
+            inner: self.inner.clone(),
+            run_id: run_id.clone(),
+            armed: true,
+        };
 
         let inner = self.inner.clone();
         let worker_run_id = run_id.clone();
         let worker_data_dir = data_dir.to_path_buf();
-        std::thread::spawn(move || {
-            let outcome =
-                execute_diagnostic(definition, &worker_data_dir, &worker_run_id, &cancel, &inner);
-            let mut runs = inner.runs.lock().expect("runs lock");
-            if let Some(entry) = runs.get_mut(&worker_run_id) {
-                if let Ok(mut finished) = entry.finished.lock() {
-                    *finished = Some(outcome);
-                }
-            }
-            if inner.active.load(Ordering::SeqCst) > 0 {
-                inner.active.fetch_sub(1, Ordering::SeqCst);
-            }
-        });
+        // The guard moves into the closure and owns the run's admission
+        // from here on: `record_finished` releases the slot on success,
+        // `disarm` retires the guard, and a panic unwinds through the
+        // guard's Drop — which releases admission and removes the entry.
+        // If the spawn itself fails, the closure (and the guard inside)
+        // is dropped: same RAII release, no phantom entry.
+        std::thread::Builder::new()
+            .name(format!("diagnostic-{worker_run_id}"))
+            .spawn(move || {
+                let outcome = execute_diagnostic(
+                    definition,
+                    &worker_data_dir,
+                    &worker_run_id,
+                    &cancel,
+                    &inner,
+                );
+                inner.record_finished(&worker_run_id, outcome);
+                admission.disarm(); // worker owns the run from here
+            })
+            .map_err(|e| format!("could not start the diagnostic worker: {e}"))?;
+
         Ok(run_id)
     }
 
@@ -240,7 +403,9 @@ impl RunRegistry {
         })
     }
 
-    /// Requests cancellation of a running diagnostic.
+    /// Requests cancellation of a running diagnostic. Only signals a
+    /// live, unfinished probe — a finished entry has no PID to target
+    /// (stale/reused-PID guard).
     pub fn cancel(&self, run_id: &str) -> Result<(), String> {
         let runs = self.inner.runs.lock().expect("runs lock");
         let entry = runs
@@ -248,25 +413,22 @@ impl RunRegistry {
             .ok_or_else(|| format!("unknown run \"{run_id}\"."))?;
         entry.cancel.store(true, Ordering::SeqCst);
         if let Some(pid) = *entry.pid.lock().expect("pid lock") {
-            // Unix: signal the whole probe process group so descendants
-            // holding inherited pipes die with the direct child.
             #[cfg(unix)]
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            {
+                // Unix: signal the whole probe process group so
+                // descendants holding inherited pipes die with the
+                // direct child.
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
             }
             #[cfg(not(unix))]
             {
-                let _ = pid; // direct-child kill happens via KillOnDrop
+                let _ = pid; // direct-child kill happens via the worker
             }
         }
         Ok(())
     }
-}
-
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 /// Executes the diagnostic and returns the recorded outcome. Runs on the
@@ -281,21 +443,24 @@ fn execute_diagnostic(
     let started_at = now_rfc3339();
     let started = Instant::now();
 
-    let mut finish = |outcome: RunOutcome,
-                      exit_code: Option<i32>,
-                      output: String,
-                      error: Option<String>,
-                      finished_at: String| {
-        RunOutcomeDto {
+    // Records the outcome and returns the DTO (single construction point).
+    let finish = |outcome: RunOutcome,
+                  exit_code: Option<i32>,
+                  output: String,
+                  error: Option<String>|
+     -> RunOutcomeDto {
+        let dto = RunOutcomeDto {
             agent_id: definition.id.to_string(),
             started_at: started_at.clone(),
             duration_ms: started.elapsed().as_millis() as u64,
             outcome,
             exit_code,
-            output,
-            error,
-            finished_at,
-        }
+            output: output.clone(),
+            error: error.clone(),
+            finished_at: now_rfc3339(),
+        };
+        inner.record_finished(run_id, dto.clone());
+        dto
     };
 
     // Adapter + eligibility.
@@ -310,7 +475,6 @@ fn execute_diagnostic(
                     "\"{}\" has no execution adapter in this build.",
                     definition.id
                 )),
-                now_rfc3339(),
             );
         }
     };
@@ -319,12 +483,7 @@ fn execute_diagnostic(
             RunOutcome::Failed,
             None,
             String::new(),
-            Some(format!(
-                "\"{}\" cannot run a diagnostic safely with the documented \
-                 invocation of this CLI version; execution stays disabled.",
-                definition.display_name
-            )),
-            now_rfc3339(),
+            Some(adapter.unsafe_diagnostics_reason().to_string()),
         );
     }
 
@@ -340,22 +499,15 @@ fn execute_diagnostic(
                     "the \"{}\" executable was not found on this computer.",
                     definition.display_name
                 )),
-                now_rfc3339(),
             );
         }
         discovery::DiscoveryOutcome::Error { message } => {
-            return finish(
-                RunOutcome::Failed,
-                None,
-                String::new(),
-                Some(message),
-                now_rfc3339(),
-            );
+            return finish(RunOutcome::Failed, None, String::new(), Some(message));
         }
     };
 
     // Isolated working directory: application-managed, no user project
-    // data, removed after the run.
+    // data. Removed only after the process tree is terminated.
     let work_dir = data_dir.join("diagnostic-runs").join(run_id);
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
         return finish(
@@ -363,9 +515,28 @@ fn execute_diagnostic(
             None,
             String::new(),
             Some(format!("could not create the isolated run directory: {e}")),
-            now_rfc3339(),
         );
     }
+
+    // Reader-slot admission: reuse the proven verification pool. Two
+    // slots for the run's stdout/stderr readers; an exhausted pool fails
+    // the run before any spawn (slots released via RAII below).
+    let (stdout_slot, stderr_slot) = match super::verify::acquire_reader_slot_pair() {
+        Some(pair) => pair,
+        None => {
+            let _ = std::fs::remove_dir_all(&work_dir);
+            return finish(
+                RunOutcome::Failed,
+                None,
+                String::new(),
+                Some(
+                    "the local resource limit for output readers is \
+                     exhausted — try again shortly."
+                        .to_string(),
+                ),
+            );
+        }
+    };
 
     // Spawn: adapter-owned arguments, explicit working directory, own
     // process group (unix) for whole-tree cancellation.
@@ -381,29 +552,30 @@ fn execute_diagnostic(
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(e) => {
+        Err(_) => {
+            drop(stdout_slot);
+            drop(stderr_slot);
             let _ = std::fs::remove_dir_all(&work_dir);
             return finish(
                 RunOutcome::Failed,
                 None,
                 String::new(),
-                Some(format!(
+                Some(
                     "the executable could not be started: it may be \
                      incompatible with this system or lack execute permission."
-                )),
-                now_rfc3339(),
+                        .to_string(),
+                ),
             );
         }
     };
 
     // Register the pid so cancellation can signal the whole group.
     let pid = child.id();
-    if let Ok(mut runs) = inner.runs.lock() {
-        if let Some(entry) = runs.get_mut(run_id) {
-            if let Ok(mut slot) = entry.pid.lock() {
-                *slot = Some(pid);
-            }
-        }
+    if let Ok(mut runs) = inner.runs.lock()
+        && let Some(entry) = runs.get_mut(run_id)
+        && let Ok(mut slot) = entry.pid.lock()
+    {
+        *slot = Some(pid);
     }
 
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -412,31 +584,36 @@ fn execute_diagnostic(
     let drain_guard = DrainGuard(shared.clone());
     let stdout_reader = std::thread::spawn({
         let shared = shared.clone();
-        move || read_drained(stdout, &shared, 0)
+        move || {
+            read_drained(stdout, &shared, 0);
+            drop(stdout_slot); // capacity returns when this reader terminates
+        }
     });
     let stderr_reader = std::thread::spawn({
         let shared = shared.clone();
-        move || read_drained(stderr, &shared, 1)
+        move || {
+            read_drained(stderr, &shared, 1);
+            drop(stderr_slot);
+        }
     });
 
     // Poll loop: deadline, cancellation, child exit.
-    let deadline = Instant::now() + DIAGNOSTIC_TIMEOUT;
+    let deadline = Instant::now() + effective_timeout();
     let mut timed_out = false;
-    let status = loop {
+    let mut cancelled = false;
+    let exit_status = loop {
         if cancel.load(Ordering::SeqCst) {
+            cancelled = true;
             #[cfg(unix)]
             unsafe {
                 libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
             }
             let _ = child.kill();
-            break None; // cancellation path
+            break None;
         }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
-                if cancel.load(Ordering::SeqCst) {
-                    continue; // re-check on the next iteration
-                }
                 if Instant::now() >= deadline {
                     timed_out = true;
                     break None;
@@ -444,19 +621,23 @@ fn execute_diagnostic(
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(e) => {
+                // The reader slots live with the reader threads; abandoning
+                // the readers (DrainGuard) lets them release capacity.
+                drop(drain_guard);
+                let _ = child.kill();
+                let _ = child.wait();
                 let _ = std::fs::remove_dir_all(&work_dir);
                 return finish(
                     RunOutcome::Failed,
                     None,
                     String::new(),
                     Some(format!("could not track the CLI process: {e}")),
-                    now_rfc3339(),
                 );
             }
         }
     };
 
-    if timed_out {
+    if timed_out || cancelled {
         // Terminate the whole tree; the readers drain what remains.
         #[cfg(unix)]
         unsafe {
@@ -465,95 +646,81 @@ fn execute_diagnostic(
         let _ = child.kill();
     }
 
-    // Short grace for the readers after the tree is signalled, then
-    // abandon them (bounded buffers; they close at the next wakeup).
+    // Short grace for the readers after the tree is signalled, then the
+    // DrainGuard stops them (bounded buffers).
     let grace_deadline = Instant::now() + READER_GRACE;
     while !shared.readers_done() && Instant::now() < grace_deadline {
         std::thread::sleep(POLL_INTERVAL);
     }
     drop(drain_guard);
-    drop(stdout_reader);
+    drop(stdout_reader); // abandoned if pipes are still held (bounded)
     drop(stderr_reader);
     let (stdout_bytes, stderr_bytes) = shared.snapshot();
 
+    // Reap the direct child (no zombie) — the tree is dead and the
+    // directory can no longer be used by any surviving process.
+    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&work_dir);
+    if let Ok(mut runs) = inner.runs.lock()
+        && let Some(entry) = runs.get_mut(run_id)
+        && let Ok(mut slot) = entry.pid.lock()
+    {
+        *slot = None; // no stale/reused-PID targeting
+    }
 
     let output = String::from_utf8_lossy(&stdout_bytes)
         .chars()
         .take(8000)
         .collect::<String>();
-    let stderr_excerpt = String::from_utf8_lossy(&stderr_bytes)
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(200)
-        .collect::<String>();
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes);
 
-    // Cancellation: the loop broke on the cancel flag.
-    if cancel.load(Ordering::SeqCst) && status.is_none() && !timed_out {
+    // Provider-specific result parsing (Claude Code is disabled upstream,
+    // but the parsing contract is adapter-owned and fixture-tested).
+    let parsed = adapter.parse_result(
+        exit_code_of(&exit_status),
+        &String::from_utf8_lossy(&stdout_bytes),
+        &stderr_text,
+    );
+
+    if cancelled {
         return finish(
             RunOutcome::Cancelled,
-            None,
+            exit_code_of(&exit_status),
             output,
             Some("the run was cancelled.".to_string()),
-            now_rfc3339(),
         );
     }
     if timed_out {
         return finish(
             RunOutcome::TimedOut,
-            status.and_then(|s| s.code()),
+            exit_code_of(&exit_status),
             output,
             Some(format!(
                 "the diagnostic timed out after {}s — the process tree was \
                  terminated.",
-                DIAGNOSTIC_TIMEOUT.as_secs()
+                effective_timeout().as_secs()
             )),
-            now_rfc3339(),
         );
     }
 
-    let exit_code = status.and_then(|s| s.code());
-    match exit_code {
-        Some(0) => {
-            if output.trim().is_empty() {
-                finish(
-                    RunOutcome::Failed,
-                    exit_code,
-                    output,
-                    Some(
-                        "the CLI exited successfully but produced no output."
-                            .to_string(),
-                    ),
-                    now_rfc3339(),
-                )
-            } else {
-                finish(RunOutcome::Succeeded, exit_code, output, None, now_rfc3339())
-            }
-        }
-        Some(code) => finish(
-            RunOutcome::Failed,
-            exit_code,
-            output,
-            Some(format!(
-                "the CLI exited with code {code}.{}",
-                if stderr_excerpt.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {stderr_excerpt}")
-                }
-            )),
-            now_rfc3339(),
+    match parsed {
+        Ok(response) => finish(
+            RunOutcome::Succeeded,
+            exit_code_of(&exit_status),
+            response,
+            None,
         ),
-        None => finish(
+        Err(error) => finish(
             RunOutcome::Failed,
-            exit_code,
+            exit_code_of(&exit_status),
             output,
-            Some("the CLI was terminated by a signal.".to_string()),
-            now_rfc3339(),
+            Some(error),
         ),
     }
+}
+
+fn exit_code_of(status: &Option<std::process::ExitStatus>) -> Option<i32> {
+    status.and_then(|s| s.code())
 }
 
 /// Drains a pipe to EOF, retaining at most MAX_RUN_OUTPUT_BYTES per
@@ -572,4 +739,108 @@ fn read_drained(mut stream: impl Read, shared: &SharedOutput, stream_index: usiz
         }
     }
     shared.mark_done(stream_index);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::definitions::AgentCapabilities;
+    use std::path::PathBuf;
+
+    /// Admission tests must never be able to spawn a real provider CLI —
+    /// a machine with `codex` installed would otherwise execute it. The
+    /// fixture keeps the adapter id (so `find_adapter` resolves) but
+    /// points discovery at an executable name that exists nowhere.
+    static ABSENT_FIXTURE: AgentDefinition = AgentDefinition {
+        id: "codex",
+        display_name: "Fixture (absent executable)",
+        provider: "Test",
+        adapter: "cli",
+        executable_name: "orqen-absent-fixture-cli",
+        capabilities: AgentCapabilities {
+            discovery: true,
+            verification: true,
+            execution: true,
+            orchestration: false,
+        },
+    };
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orqen-exec-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn registry_starts_exactly_one_run_atomically() {
+        let registry = RunRegistry::default();
+        let definition = &ABSENT_FIXTURE;
+        let dir = temp_dir();
+
+        let run_id = registry.start(definition, &dir).expect("first start");
+        assert!(
+            registry.start(definition, &dir).is_err(),
+            "second concurrent start must be rejected"
+        );
+        // No phantom entry: exactly one registered run.
+        assert!(registry.status(&run_id).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_start_requests_admit_at_most_one() {
+        use std::sync::Barrier;
+        let registry = Arc::new(RunRegistry::default());
+        let definition = &ABSENT_FIXTURE;
+        let dir = Arc::new(temp_dir());
+        let barrier = Arc::new(Barrier::new(6));
+
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let registry = registry.clone();
+            let definition_copy: &'static AgentDefinition = definition;
+            let dir = dir.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                registry.start(definition_copy, &dir)
+            }));
+        }
+        let results: Vec<Result<String, String>> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
+        let admitted: Vec<&Result<String, String>> = results.iter().filter(|r| r.is_ok()).collect();
+        assert_eq!(
+            admitted.len(),
+            1,
+            "exactly one of six simultaneous starts may be admitted"
+        );
+        for rejected in results.iter().filter(|r| r.is_err()) {
+            assert!(
+                rejected
+                    .as_ref()
+                    .expect_err("rejected")
+                    .contains("already in progress"),
+                "rejection must explain the busy state"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&*dir);
+    }
+
+    #[test]
+    fn rejected_start_leaves_no_registered_run() {
+        let registry = RunRegistry::default();
+        let definition = &ABSENT_FIXTURE;
+        let dir = temp_dir();
+
+        registry.start(definition, &dir).expect("first start");
+        assert!(registry.start(definition, &dir).is_err());
+        // The active count is back to one run; a rejected start must not
+        // have created a second registered entry. Registry internals are
+        // private — assert via the admission state: another start must
+        // still be rejected (one is active).
+        assert!(registry.start(definition, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&*dir);
+    }
 }

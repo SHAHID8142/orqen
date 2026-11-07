@@ -17,6 +17,7 @@ function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
       verification: true,
       execution: false,
       orchestration: false,
+      diagnosticExecution: false,
     },
     discovery: { status: "not_checked" },
     verification: null,
@@ -317,6 +318,84 @@ describe("agents store — diagnostic test-run state machine", () => {
     expect(ipc.cancelRun).toHaveBeenCalledWith("run-1");
     await confirm;
     expect(store.getState().run.phase).toBe("cancelled");
+  });
+
+  it("honors a cancel requested while the Start IPC is still pending", async () => {
+    let cancelledFlag = false;
+    const startDeferred = deferred<string>();
+    const ipc = makeIpc({
+      startRun: vi.fn().mockReturnValue(startDeferred.promise),
+      runStatus: vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          cancelledFlag
+            ? {
+                phase: "finished",
+                result: {
+                  agentId: "codex",
+                  startedAt: "2026-01-01T00:00:00Z",
+                  finishedAt: "2026-01-01T00:00:01Z",
+                  durationMs: 1000,
+                  outcome: "cancelled",
+                  exitCode: null,
+                  output: "",
+                  error: "the run was cancelled.",
+                },
+              }
+            : {
+                phase: "running",
+                agentId: "codex",
+                startedAt: "2026-01-01T00:00:00Z",
+              },
+        ),
+      ),
+    });
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    const confirm = store.confirmTestRun();
+    await vi.waitFor(() => expect(store.getState().run.phase).toBe("starting"));
+
+    // Cancel while the Start IPC is pending: no run id exists yet, so no
+    // backend call is possible — but the intent must be recorded, never
+    // silently ignored.
+    await store.cancelRun();
+    expect(store.getState().run.cancelRequested).toBe(true);
+    expect(ipc.cancelRun).not.toHaveBeenCalled();
+
+    // The late Start response must not overwrite the cancel intent: the
+    // store cancels the run the moment the id arrives.
+    cancelledFlag = true;
+    startDeferred.resolve("run-9");
+    await vi.waitFor(() => expect(ipc.cancelRun).toHaveBeenCalledWith("run-9"));
+    expect(store.getState().run.phase).toBe("running");
+    expect(store.getState().run.cancelRequested).toBe(true);
+
+    await confirm;
+    expect(store.getState().run.phase).toBe("cancelled");
+  });
+
+  it("reports a start failure truthfully even when a cancel was requested during starting", async () => {
+    const startDeferred = deferred<string>();
+    const ipc = makeIpc({
+      startRun: vi.fn().mockReturnValue(startDeferred.promise),
+    });
+    const store = createAgentsStore(ipc);
+    await store.load();
+
+    store.requestTestRun("codex");
+    const confirm = store.confirmTestRun();
+    await vi.waitFor(() => expect(store.getState().run.phase).toBe("starting"));
+    await store.cancelRun();
+    expect(store.getState().run.cancelRequested).toBe(true);
+
+    // The run never started, so the truthful terminal state is the start
+    // failure itself — nothing was running to cancel.
+    startDeferred.reject({ kind: "storage", message: "the executable could not be started" });
+    await confirm;
+    expect(store.getState().run.phase).toBe("failed");
+    expect(store.getState().run.error?.message).toContain("could not be started");
+    expect(ipc.cancelRun).not.toHaveBeenCalled();
   });
 
   it("dismisses a terminal run back to idle", async () => {

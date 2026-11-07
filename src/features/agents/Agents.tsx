@@ -126,11 +126,14 @@ function AgentTestRunSection() {
   const run = agents.run;
   const settingsReady = settings.phase === "ready";
 
-  // Eligible: registry-loaded, executable found, verified, not currently running.
+  // Eligible: registry-loaded, executable found, verified, AND this build
+  // can run a safe diagnostic for the adapter (e.g. Claude Code is
+  // currently disabled and must not offer a run button at all).
   const eligible = agents.records.filter(
     (record) =>
       record.discovery.status === "found" &&
-      record.verification?.status === "verified",
+      record.verification?.status === "verified" &&
+      record.capabilities.diagnosticExecution,
   );
   const preferred = settings.data.mainAgentId;
 
@@ -226,11 +229,16 @@ function AgentTestRunSection() {
             {run.phase === "starting"
               ? "Starting diagnostic run…"
               : "Diagnostic running…"}{" "}
+            {run.cancelRequested && <strong>Cancelling…</strong>}{" "}
             <span className="option-note">
               The prompt is fixed and runs in an isolated directory.
             </span>
           </p>
-          <button type="button" onClick={() => void agentsStore.cancelRun()}>
+          <button
+            type="button"
+            disabled={run.cancelRequested}
+            onClick={() => void agentsStore.cancelRun()}
+          >
             Cancel run
           </button>
         </div>

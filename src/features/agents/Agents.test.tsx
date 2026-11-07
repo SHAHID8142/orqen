@@ -25,6 +25,7 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
       verification: true,
       execution: false,
       orchestration: false,
+      diagnosticExecution: false,
     },
     discovery: { status: "not_checked" },
     verification: null,

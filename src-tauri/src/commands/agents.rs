@@ -20,6 +20,9 @@ pub struct AgentCapabilitiesDto {
     pub verification: bool,
     pub execution: bool,
     pub orchestration: bool,
+    /// Whether THIS build can execute a safe diagnostic for the agent —
+    /// the adapter's own eligibility, not just the capability category.
+    pub diagnostic_execution: bool,
 }
 
 /// Discovery state of one agent.
@@ -76,6 +79,9 @@ fn definition_to_status(
             verification: definition.capabilities.verification,
             execution: definition.capabilities.execution,
             orchestration: definition.capabilities.orchestration,
+            diagnostic_execution: crate::agents::execution::find_adapter(definition.id)
+                .map(|adapter| adapter.supports_safe_diagnostics())
+                .unwrap_or(false),
         },
         discovery: DiscoveryDto::NotChecked,
         verification: None,
@@ -148,9 +154,9 @@ pub async fn get_diagnostic_run(
     registry: tauri::State<'_, crate::agents::runner::RunRegistry>,
     run_id: String,
 ) -> CommandResult<crate::agents::runner::RunStatusDto> {
-    Ok(registry.status(&run_id).unwrap_or(
-        crate::agents::runner::RunStatusDto::Unknown,
-    ))
+    Ok(registry
+        .status(&run_id)
+        .unwrap_or(crate::agents::runner::RunStatusDto::Unknown))
 }
 
 /// Cancels a running diagnostic: signals the process group (unix) and
@@ -160,9 +166,7 @@ pub async fn cancel_diagnostic_run(
     registry: tauri::State<'_, crate::agents::runner::RunRegistry>,
     run_id: String,
 ) -> CommandResult<()> {
-    registry
-        .cancel(&run_id)
-        .map_err(CommandError::Storage)
+    registry.cancel(&run_id).map_err(CommandError::Storage)
 }
 
 /// Locates the agent's executable on the search path. Never executes it.
@@ -247,9 +251,19 @@ mod tests {
         assert_eq!(agents.len(), 2);
         assert!(matches!(agents[0].discovery, DiscoveryDto::NotChecked));
         assert!(agents[0].verification.is_none());
-        // Phase 3 Feature 002: diagnostic execution is now implemented.
+        // Phase 3 Feature 002: diagnostic execution is implemented, with
+        // per-adapter eligibility (Codex enabled, Claude Code disabled).
         assert!(agents[0].capabilities.execution);
+        assert!(agents[0].capabilities.diagnostic_execution);
         assert!(!agents[0].capabilities.orchestration);
+        let claude = agents
+            .iter()
+            .find(|a| a.id == "claude-code")
+            .expect("claude-code entry");
+        assert!(
+            !claude.capabilities.diagnostic_execution,
+            "claude-code diagnostics must report disabled eligibility"
+        );
     }
 
     #[test]

@@ -48,6 +48,10 @@ export interface DiagnosticRunState {
   agentId: string | null;
   result: RunOutcomeDto | null;
   error: CommandErrorPayload | null;
+  /** True when the user asked to cancel while the Start IPC was still
+   * pending (no run id existed yet). The intent is honored the moment
+   * the run id arrives — it is never silently ignored. */
+  cancelRequested: boolean;
 }
 
 const IDLE_RUN: DiagnosticRunState = {
@@ -56,6 +60,7 @@ const IDLE_RUN: DiagnosticRunState = {
   agentId: null,
   result: null,
   error: null,
+  cancelRequested: false,
 };
 
 
@@ -221,6 +226,8 @@ export function createAgentsStore(ipc: AgentsIpc): AgentsStore {
     try {
       runId = await ipc.startRun(agentId);
     } catch (error) {
+      // The run never started, so a pending cancel intent is moot — the
+      // truthful terminal state is the start failure itself.
       setState({
         run: {
           ...IDLE_RUN,
@@ -231,9 +238,28 @@ export function createAgentsStore(ipc: AgentsIpc): AgentsStore {
       });
       return;
     }
+    // A cancel requested while the Start IPC was pending is honored now:
+    // the run id exists, so the backend can actually terminate the run.
+    const cancelWasRequested = state.run.cancelRequested;
     setState({
-      run: { ...IDLE_RUN, phase: "running", runId, agentId },
+      run: { ...IDLE_RUN, phase: "running", runId, agentId, cancelRequested: cancelWasRequested },
     });
+    if (cancelWasRequested) {
+      try {
+        await ipc.cancelRun(runId);
+      } catch (error) {
+        setState({
+          run: {
+            phase: "running",
+            runId,
+            agentId,
+            result: null,
+            error: normalizeError(error),
+            cancelRequested: cancelWasRequested,
+          },
+        });
+      }
+    }
     // Poll until terminal (bounded by the backend's own 120s deadline).
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 700));
@@ -248,6 +274,7 @@ export function createAgentsStore(ipc: AgentsIpc): AgentsStore {
             agentId,
             result: null,
             error: normalizeError(error),
+            cancelRequested: state.run.cancelRequested,
           },
         });
         return;
@@ -260,6 +287,7 @@ export function createAgentsStore(ipc: AgentsIpc): AgentsStore {
             agentId,
             result: status.result,
             error: null,
+            cancelRequested: state.run.cancelRequested,
           },
         });
         return;
@@ -272,6 +300,7 @@ export function createAgentsStore(ipc: AgentsIpc): AgentsStore {
             agentId,
             result: null,
             error: { kind: "internal", message: "the run is no longer tracked (session ended)." },
+            cancelRequested: state.run.cancelRequested,
           },
         });
         return;
@@ -281,6 +310,15 @@ export function createAgentsStore(ipc: AgentsIpc): AgentsStore {
   }
 
   async function cancelRun(): Promise<void> {
+    // Starting phase: the Start IPC is still pending, so no run id (and
+    // no backend handle) exists yet. Record the intent — confirmTestRun
+    // cancels the run the moment the id arrives. Never silently ignored.
+    if (state.run.phase === "starting" && state.run.runId === null) {
+      if (!state.run.cancelRequested) {
+        setState({ run: { ...state.run, cancelRequested: true } });
+      }
+      return;
+    }
     const runId = state.run.runId;
     if (runId === null || (state.run.phase !== "running" && state.run.phase !== "starting")) {
       return;

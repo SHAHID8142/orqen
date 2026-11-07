@@ -8,7 +8,7 @@ Single source of truth for "where is the project right now". Updated at every me
 | --- | --- |
 | **Phase** | 3 — Agent Registry & Adapters |
 | **Feature** | 002 — Real Agent Execution Adapters & Controlled Test Runs |
-| **Progress** | Feature delivered: registry for Codex + Claude Code, PATH-based cross-platform discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted in SQLite (migration v2, real Phase 2 DB upgraded on launch). **114 frontend + 75 Rust tests pass; all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
+| **Progress** | Feature delivered: registry for Codex + Claude Code, PATH-based cross-platform discovery, explicit user-initiated `--version` verification (fixed noninteractive argument, timeout + whole-tree kill, bounded output; shell-invocation scoped per platform — see D-017), Main Agent preference persisted in SQLite (migration v2, real Phase 2 DB upgraded on launch). **Remediation delivered: atomic run admission (admit-before-register, RAII release), Claude Code diagnostics DISABLED (isolation not verifiable), truthful machine-readable provider parsing, starting-state cancellation, enforced reader-slot reuse, bounded finished-run retention, backend integration tests. 116 frontend + 93 Rust tests pass (83 lib + 6 execution-integration + 4 persistence-integration; plus 1 timeout-path test under the test-only `test-timeouts` feature); all local gates pass. CI = BLOCKED — EXTERNAL (unchanged)** |
 | **Blockers** | **CI blocked externally** (see [QA_REPORT.md](QA_REPORT.md) CI verification) — external to the repository; rerun path documented there. |
 | **Next review checkpoint** | Manual review of Phase 3 Feature 002 (execution adapters, diagnostic run) |
 | **Next feature (after approval)** | Per [ROADMAP.md](ROADMAP.md): Phase 4 — Chat Infrastructure & Modes |
@@ -68,12 +68,13 @@ Single source of truth for "where is the project right now". Updated at every me
 
 ## Open items carried forward
 
-1. **Windows verification** — CI runs Rust checks on Linux and frontend gates on Linux; Windows packaging is not machine-verified in CI yet (planned Phase 11, [ROADMAP.md](ROADMAP.md)).
-2. **ESLint 10 dev-only advisories** — accepted consciously (D-009), reassess next phase.
-3. **Style CSP hardening** — `'unsafe-inline'` retained for styles (D-005); revisit in hardening.
-4. **Visual confirmation of focus indicators** — the overlay interaction model is verified by automated tests and a real-browser keyboard matrix (QA_REPORT accessibility-fix section); final on-screen confirmation of focus ring appearance by the user remains part of manual review.
-5. **Interactive restart verification** — persistence verified by automated reopen tests and a real-launch DB probe; the visual restart walkthrough (create → relaunch → see data) awaits the user's manual pass (checklist in the Phase 2 final report).
-6. **Credentials at rest** — no secrets are stored today; when agent credentials arrive (Phase 3+), they go to the OS keychain, never plaintext SQLite ([ARCHITECTURE.md §Persistence](ARCHITECTURE.md)).
+1. **Windows verification** — CI runs Rust checks on Linux and frontend gates on Linux; Windows packaging is not machine-verified in CI yet (planned Phase 11, [ROADMAP.md](ROADMAP.md)). Cross-compilation from this macOS host is blocked at the bundled-SQLite C build (no MSVC/mingw toolchain installed); the Unix-only API audit is instead verified statically (every `std::os::unix`/`libc` use is cfg-gated). Windows diagnostic-run runtime behavior (direct-child kill only) remains unverified until a Windows machine or CI runner exists.
+2. **Claude Code diagnostic execution disabled** — the adapter stays off because the CLI's inherited global configuration, version-dependent tool restrictions, and print-mode lack of read-only filesystem enforcement make isolation unverifiable; the live `unrecognized_model` failure also remains unresolved ([ARCHITECTURE.md §Trust boundaries](ARCHITECTURE.md), [QA_REPORT.md](QA_REPORT.md)).
+3. **ESLint 10 dev-only advisories** — accepted consciously (D-009), reassess next phase.
+4. **Style CSP hardening** — `'unsafe-inline'` retained for styles (D-005); revisit in hardening.
+5. **Visual confirmation of focus indicators** — the overlay interaction model is verified by automated tests and a real-browser keyboard matrix (QA_REPORT accessibility-fix section); final on-screen confirmation of focus ring appearance by the user remains part of manual review.
+6. **Interactive restart verification** — persistence verified by automated reopen tests and a real-launch DB probe; the visual restart walkthrough (create → relaunch → see data) awaits the user's manual pass (checklist in the Phase 2 final report).
+7. **Credentials at rest** — no secrets are stored today; when agent credentials arrive (Phase 3+), they go to the OS keychain, never plaintext SQLite ([ARCHITECTURE.md §Persistence](ARCHITECTURE.md)).
 
 ## Recent history
 

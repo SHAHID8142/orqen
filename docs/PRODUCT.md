@@ -36,8 +36,9 @@ Design principles:
 - Agent identity, credentials, and model selection are user-managed in Settings; credentials never enter the repository.
 
 ### 3.3a Diagnostic execution [P3 IMPLEMENTED — registry slice]
-- A controlled diagnostic test run per installed agent: fixed noninteractive prompt, isolated working directory, explicit user confirmation, truthful result rendering (status, duration, exit code, output), cancellation, and timeout.
+- A controlled diagnostic test run per eligible agent: fixed noninteractive prompt, isolated working directory, explicit user confirmation, truthful result rendering (status, duration, exit code, output), cancellation (including while the run is still starting), and timeout.
 - Authentication is the CLI's own; the run may contact the provider's service and consume the user's quota — communicated in the UI before confirmation.
+- Availability is per adapter and honest: Codex runs with its documented read-only sandbox; Claude Code diagnostic execution is currently **disabled** in the app because its isolation cannot be verified across CLI versions (see [ARCHITECTURE.md §Trust boundaries](ARCHITECTURE.md)).
 - This is the only executed agent interaction so far: no conversations, no coding tasks, no delegation.
 
 ### 3.4 Orchestration [PLANNED]

@@ -117,3 +117,9 @@ Only entries with a validated root cause and an applied correction belong here. 
 **Root cause:** cargo fingerprinting relies on mtimes; coarse-grained or delayed mtime updates on the external filesystem made edited sources appear unchanged.
 **Correction:** `cargo clean -p orqen` forced a full rebuild; the fresh binary confirmed the already-applied `done`-check fix worked (counter returned to 0 after each probe).
 **Prevention rule:** on this machine, when test behavior contradicts the current source, force `cargo clean -p orqen` before doubting the logic — and prefer verifying fixes with a fresh compile (check the log for `Compiling orqen`).
+
+## L-021 | 2026-11-06 | Registry/execution tests resolved a REAL agent definition — a machine with the CLI installed would have executed it
+**What failed:** the run-admission unit tests called `registry.start(find_definition("codex"), …)`. The worker thread re-runs PATH discovery before spawning; on the development machine `codex` is absent so the run failed harmlessly at discovery — but on any machine WITH `codex` installed, `cargo test` would have spawned the real provider CLI (contacting the provider, consuming quota) from an automated test.
+**Root cause:** using the real registry entry was convenient for adapter resolution, but "the CLI happens to be absent here" is not a safety mechanism — the test's safety must not depend on the host's installed software.
+**Correction:** admission tests use a static fixture definition with the same adapter id but an `executable_name` that exists nowhere (`orqen-absent-fixture-cli`), so discovery can never resolve; lifecycle integration tests use a controlled PATH-fixture shell script. D-021 records the rule.
+**Prevention rule:** any test that can reach process spawning must reference fixtures that cannot resolve to a real installed CLI on ANY machine — never the production definitions of real agents.

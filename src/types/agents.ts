@@ -9,6 +9,10 @@ export interface AgentCapabilities {
   verification: boolean;
   execution: boolean;
   orchestration: boolean;
+  /** This build can execute a safe diagnostic for the agent (the
+   * adapter's own eligibility — false, e.g., while Claude Code
+   * diagnostics are disabled). */
+  diagnosticExecution: boolean;
 }
 
 /**

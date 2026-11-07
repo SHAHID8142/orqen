@@ -225,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses std::os::unix::fs::symlink
     fn symlinks_to_executables_are_resolved_safely() {
         // metadata() follows symlinks: a link pointing at a real
         // executable is a valid candidate; a broken link is skipped.

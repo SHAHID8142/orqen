@@ -21,6 +21,27 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+## Phase 3 · Feature 002 review remediation verification (2026-11-06, local, macOS 27.2 arm64)
+
+| # | Check | Method | Result |
+| --- | --- | --- | --- |
+| 1 | Frontend gates | `npm ci` → `npm run verify` (eslint + `tsc` strict + vitest + production build) | PASS — **116/116** frontend tests (2 new starting-state cancellation tests), production build clean |
+| 2 | Rust gates | `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` (also with `--features test-timeouts`) | PASS — 0 warnings in both feature configurations |
+| 3 | Rust tests (plain) | `cargo test` | PASS — 83 lib + 6 execution integration + 4 persistence integration + 0 (timeout file compiled out without the feature) |
+| 4 | Rust tests (timeout path) | `cargo test --features test-timeouts` | PASS — additionally 1 timeout integration test: a hung fixture hit the 2 s override deadline, was tree-killed, reported `timed_out` with no exit code, and its work dir was removed |
+| 5 | Atomic admission (backend) | `registry_starts_exactly_one_run_atomically`, `concurrent_start_requests_admit_at_most_one` (6 threads + barrier), `rejected_start_leaves_no_registered_run` + integration `simultaneous_starts_admit_exactly_one` | PASS — exactly one of six simultaneous starts admitted; rejections explain the busy state; no phantom registry entries |
+| 6 | Filesystem boundary (backend) | integration `diagnostic_process_runs_inside_the_isolated_directory` — the fixture prints its own working directory | PASS — the diagnostic process ran in `<data>/diagnostic-runs/<run-id>`, and that directory was removed after the run. Scope recorded honestly: this is start-directory isolation, NOT a read sandbox (see ARCHITECTURE.md) |
+| 7 | Process lifecycle (backend) | integration `cancelled_run_terminates_promptly_and_reports_cancelled` + retention/exhaustion tests | PASS — cancellation terminated the sleeping fixture promptly (no exit code = killed), reported `cancelled`, removed the work dir; finished-run retention capped at 16 (oldest pruned, verified with 17 sequential runs); reader-slot exhaustion failed a run BEFORE any spawn and the pool recovered after release |
+| 8 | Truthful provider parsing (unit) | adapter fixtures: `unrecognized_model` + `claude-code:` signals with exit 0, `is_error` JSON, malformed JSON, codex exit-code contract | PASS — SDK/config failure signals classify as FAILED even when the process exits 0 |
+| 9 | Windows compilation | `cargo check --target x86_64-pc-windows-msvc` from this macOS host | **BLOCKED — toolchain, not code**: fails in the `libsqlite3-sys` build script (bundled SQLite C) because no MSVC/mingw C toolchain exists on this host; the check never reaches Orqen's own code. Installing mingw-w64 would be a global system change requiring user authorization (not done). Compensating evidence: static audit — every `std::os::unix`/`libc` usage is `cfg`-gated (runner.rs, verify.rs, discovery.rs; one ungated unix-symlink test also gated). Windows runtime behavior (direct-child kill only) remains unverified until a Windows machine/CI runner exists |
+| 10 | Desktop launch probe | `cargo build` + direct `target/debug/orqen` launch, observed 12 s, then stopped | PASS (process level) — alive for the full window, no error output |
+| 11 | Production audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 vulnerabilities |
+| 12 | CI status | GitHub Actions | BLOCKED — EXTERNAL (billing restriction, unchanged; see CI verification section) |
+
+**Real-provider status (unchanged, unresolved):** the live diagnostic attempt against the installed Claude Code 2.1.316 still stands as evidence — the run failed at the SDK level (`unrecognized_model`) due to the user's local CLI configuration and was recorded truthfully. A fixture is NOT proof of a live fix: Claude Code diagnostic execution therefore stays DISABLED in the app (adapter `supports_safe_diagnostics() == false`, reason surfaced to the UI), and the `unrecognized_model` failure remains listed as unresolved until a real authenticated run succeeds. Codex remains absent on this machine, so no live Codex diagnostic was possible either — the Codex path is verified by controlled fixtures only (reported as PARTIAL, not passed).
+
+**Scope honesty:** the isolated working directory is verified as the process's start directory; it is not a confidentiality boundary. Enforced OS-level confinement exists only via the provider's own documented sandbox (Codex `--sandbox read-only`); Claude Code is disabled because no verifiable equivalent exists. No prompt instruction is presented as a security boundary anywhere.
+
 ## Phase 3 · Feature 001 verification (2026-11-06, local, macOS 27.2 arm64)
 
 | # | Check | Command | Result |
