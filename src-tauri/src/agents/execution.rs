@@ -102,14 +102,21 @@ fn toml_quote(value: &str) -> String {
 }
 
 /// Extracts a (major, minor, patch) triple from a `--version` output
-/// such as `codex-cli 0.164.0`. `None` when no version token exists —
-/// the caller must fail closed.
+/// such as `codex-cli 0.164.0`. Pre-release/build suffixes on the patch
+/// segment are tolerated by comparing the BASE triple
+/// (`0.167.0-alpha.3.2` → 0.167.0): a prerelease at/above the floor
+/// still carries the floor's flags and schema, and the enforcement
+/// preflight — not the version number — is the actual safety gate
+/// (D-024). `None` when no version token exists — the caller must fail
+/// closed.
 fn parse_semver_triple(version_output: &str) -> Option<(u64, u64, u64)> {
     version_output.split_whitespace().find_map(|token| {
         let mut parts = token.split('.');
         let major = parts.next()?.parse().ok()?;
         let minor = parts.next()?.parse().ok()?;
-        let patch = parts.next().unwrap_or("0").parse().ok()?;
+        let patch_raw = parts.next().unwrap_or("0");
+        let patch_text = patch_raw.split(['-', '+']).next().unwrap_or(patch_raw);
+        let patch = patch_text.parse().ok()?;
         Some((major, minor, patch))
     })
 }

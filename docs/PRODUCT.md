@@ -41,6 +41,12 @@ Design principles:
 - Availability is per adapter and honest: **no diagnostic adapter is currently enabled** — Codex's documented sandbox bounds writes only (read confinement is not enforceable per invocation without modifying the user's global CLI configuration), and Claude Code's isolation cannot be verified across CLI versions. Each adapter's accurate reason is shown in the UI (see [ARCHITECTURE.md §Trust boundaries](ARCHITECTURE.md)). Execution additionally requires a fresh backend-side verification and an unchanged executable.
 - This is the only executed agent interaction so far: no conversations, no coding tasks, no delegation.
 
+### 3.3b Chat [P4 IMPLEMENTED — infrastructure slice]
+- Mode-aware, per-project conversations with the seven modes of [GOVERNANCE.md §Chat modes](GOVERNANCE.md): Interview, Research, Planning, Build, Debug, Review, Discussion.
+- Conversations and messages persist in SQLite per project and survive restarts; switching a conversation's mode changes framing only — **it never grants execution permissions** — and each message records the mode in effect when it was sent.
+- Markdown transcript export (copy-to-clipboard; D-026): participant content is preserved verbatim.
+- Truthful scope: chat is records-only — nothing in chat invokes an agent. Agent conversation arrives with orchestration (Phase 6).
+
 ### 3.4 Orchestration [PLANNED]
 - The user appoints a supported agent as **Main Orchestrator**. The orchestrator coordinates sub-agents under the shared rules in [GOVERNANCE.md §Main agent](GOVERNANCE.md).
 - Agent task assignment, structured proposals, discussion rounds, voting, verdict recording, and independent review — with the voting limits in [GOVERNANCE.md §Agent collaboration](GOVERNANCE.md).

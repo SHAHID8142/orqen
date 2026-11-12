@@ -21,6 +21,27 @@ Only observed results are recorded here — every entry lists the actual command
 | 13 | Production dependency audit | `npm run audit` (`npm audit --omit=dev`) | PASS — 0 production vulnerabilities |
 | 14 | CI run on GitHub | GitHub Actions `ci.yml` | **BLOCKED — EXTERNAL** (account-level billing restriction; evidence table in "CI verification" below). Workflow itself is valid: `actionlint` exit 0, GitHub lists it `active`, jobs instantiate once the repo is public — they are refused at start with *"The job was not started because your account is locked due to a billing issue."* CI has never reported a successful run; this is not claimed anywhere. |
 
+**Post-verification addition (2026-11-13):** the previously used npx-cached codex 0.164.0 binary was garbage-collected by npm during the intervening week (external environment change; the enforcement gate correctly FAILED with `ORQEN_REQUIRE_CODEX_ENFORCEMENT=1` and no usable binary — fail-closed behavior verified in the wild). The ChatGPT desktop app on this machine ships **codex-cli 0.167.0-alpha.3.2**, which exposed a REAL DEFECT: `parse_semver_triple` could not parse pre-release suffixes (`0-alpha` fails u64 parsing), so a legitimate, newer CLI was rejected as "older than the verified minimum". FIXED: pre-release/build suffixes are stripped and the BASE triple compares against the floor (unit tests extended: `0.167.0-alpha.3.2` / `0.167.0-beta` / `1.0.0-rc.1+build.5` accepted; `0.163.0-alpha.1` still rejected). The full enforcement suite then ran against the 0.167.0-alpha binary: **12/12 PASS** — cross-VERSION confirmation of the confinement policy on a second, newer codex build (previously proven only on 0.164.0). All gates re-run green after the fix (fmt/clippy 0, 118 lib + 12 + 9 + 4, +1 timeout feature, 121 frontend, audit 0). No package was downloaded or installed — the app-shipped binary was used as-is.
+
+## Phase 4 · Feature 001 verification (2026-11-13, local, macOS 27.2 arm64)
+
+| # | Check | Method | Result |
+| --- | --- | --- | --- |
+| 1 | Frontend gates | `npm ci` → `npm run verify` | PASS — **121/121** (3 new shell-level Chat tests: layout + mode catalog render, create→send→export end-to-end, no-project state) |
+| 2 | Rust gates | `npm run rust:fmt` + `npm run rust:clippy` + `npm run rust:check` (both feature configs) | PASS — fmt clean; clippy `-D warnings` 0 errors; check clean |
+| 3 | Rust tests | `cargo test` | PASS — **118 lib (12 new chat tests) + 12 sandbox-enforcement + 9 execution-integration + 4 persistence** |
+| 4 | Migration v3 | schema/constraint tests | PASS — conversations + messages created; mode/role CHECK constraints reject unknown values; foreign keys enforced; deleting a project cascades conversations AND messages; re-running migrations is idempotent |
+| 5 | Chat CRUD + validation | command unit tests | PASS — title/content validated in code points (D-012; emoji counted as one); unknown project/conversation = input errors (not empty lists); rename + mode switch update `updated_at` and converge the snapshot |
+| 6 | Mode honesty | per-message annotation test | PASS — a message records the conversation's mode at send time; switching mid-conversation leaves prior messages annotated with the old mode |
+| 7 | Export | export tests | PASS — Markdown transcript with header metadata (project, current mode, count, id, exported-at); participant content VERBATIM (a pasted `Q-ID:` structured block is unmodified); per-message headings `[n] role — mode — time`; honesty footer; safe slug file names (purely non-ASCII titles → fallback); empty conversations state it truthfully |
+| 8 | Chat surface | shell-level tests + full verify | PASS — 6th navigation module; two-pane layout; mode select populated from the backend catalog; truthful records-only framing ("modes never grant execution privileges", "agents do not respond in chat yet"); export overlay is a modal (aria-modal, focus on open, Escape closes); no-project and loading/error states truthful |
+| 9 | Overview truthfulness fix | code review + verify | PASS — Implemented list now names Phases 0–4 deliverables (registry, diagnostics, chat); Planned list names Phases 5–10 only — no stale "Phase 3 planned" claims |
+| 10 | Preserved safeguards | regression suites | PASS — atomic admission, sandbox enforcement suite, identity ledger, cancellation/cleanup, reader slots, Claude Code disabled state — all unchanged and green |
+| 11 | Production audit | `npm run audit` | PASS — 0 vulnerabilities |
+| 12 | CI status | GitHub Actions | BLOCKED — EXTERNAL (billing restriction, unchanged) |
+
+**Real-provider status: ACCEPTED (2026-11-07, user-authorized run — see the REAL-PROVIDER RUN section below).**
+
 ## Phase 3 · Feature 002 final manual acceptance — REAL-PROVIDER RUN (2026-11-07, user-authorized)
 
 **This run was explicitly authorized by the owner before execution (single run; no other provider calls).** The ORQEN desktop app was driven through its real UI (accessibility-element actions; screenshots as evidence).

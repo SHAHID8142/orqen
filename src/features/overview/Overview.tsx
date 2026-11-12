@@ -22,16 +22,21 @@ type RuntimeState =
 /** Capabilities actually implemented in this build. */
 const IMPLEMENTED: readonly string[] = [
   "SQLite persistence — projects, selection and settings survive restarts",
-  "Workspace shell with sidebar navigation (Overview, Projects, Agents, Workflows, Settings)",
+  "Workspace shell with sidebar navigation (Overview, Projects, Agents, Chat, Workflows, Settings)",
   "Desktop application shell (Tauri 2 + React + TypeScript)",
   "Rust core with structured IPC commands and quality gates",
+  "Agent registry — Codex + Claude Code discovery, verification and Main Agent preference (Phase 3)",
+  "Controlled diagnostic runs — one fixed prompt, enforced per-run sandbox, user-confirmed (Phase 3)",
+  "Chat — mode-aware, per-project conversations with Markdown export (Phase 4)",
 ];
 
 /** Capabilities planned for later phases — not implemented, not simulated. */
 const PLANNED: readonly string[] = [
-  "Agent registry and provider adapters (Phase 3)",
-  "Chat, interview and orchestration (Phases 4–6)",
+  "Interview mode and Project Blueprint (Phase 5)",
+  "Orchestration and multi-agent coordination (Phase 6)",
   "Workflow execution and task chunking (Phase 7)",
+  "Quality verification and shared learning (Phase 8)",
+  "Skills and MCP integration (Phase 9)",
   "Telegram remote access (Phase 10)",
 ];
 

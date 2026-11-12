@@ -1,12 +1,18 @@
 /**
  * Navigation model for the workspace shell.
  *
- * State-based view switching (D-013): five fixed surfaces, no router
+ * State-based view switching (D-013): six fixed surfaces, no router
  * dependency, no deep linking yet. If deep-linkable URLs become a
  * requirement, revisit this decision — do not grow it ad hoc.
  */
 
-export type ViewId = "overview" | "projects" | "agents" | "workflows" | "settings";
+export type ViewId =
+  | "overview"
+  | "projects"
+  | "agents"
+  | "chat"
+  | "workflows"
+  | "settings";
 
 export interface NavItem {
   id: ViewId;
@@ -18,6 +24,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Overview" },
   { id: "projects", label: "Projects" },
   { id: "agents", label: "Agents" },
+  { id: "chat", label: "Chat" },
   { id: "workflows", label: "Workflows" },
   { id: "settings", label: "Settings" },
 ];

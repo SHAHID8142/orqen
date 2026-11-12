@@ -62,7 +62,9 @@ Rust modules (`src-tauri/src/`):
 
 Dependency rule: **no circular dependencies** — `commands` may use `db` and `error`; nothing depends on `commands`. Frontend mirrors it: features depend on `lib`, never the reverse.
 
-## 2.1 Persistence architecture (Phase 2)
+   - **Chat (Phase 4, D-026):** mode-aware, per-project conversations persisted in SQLite (schema v3: `conversations` + `messages`, cascading deletes). Chat modes come from GOVERNANCE.md §3 as a backend-authoritative catalog; a mode switch updates framing only. Every message records the mode in effect when it was sent. **Chat never invokes an agent** — no IPC in the chat module reaches the process layer; agent execution in chat arrives with orchestration (Phase 6) behind its own explicit trust decision. Export renders a Markdown transcript (verbatim participant content, header metadata, honesty footer) and returns it as data — Orqen writes no files outside its data directory.
+
+## 2.1 Persistence architecture (Phase 2, extended in Phases 3–4)
 
 - **Ownership:** SQLite is accessed exclusively by Rust (`rusqlite`, `bundled` feature). The WebView never touches the database ([AGENTS.md §Security rules](../AGENTS.md)).
 - **Location:** the database lives at `<app-data-dir>/orqen.sqlite3`, where the app-data dir is Tauri's OS-managed location for the identifier `io.github.shahid8142.orqen` (macOS: `~/Library/Application Support/io.github.shahid8142.orqen/`). Never inside the repository.

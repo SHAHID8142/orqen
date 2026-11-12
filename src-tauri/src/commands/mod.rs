@@ -5,5 +5,6 @@
 
 pub mod agents;
 pub mod app_info;
+pub mod chat;
 pub mod settings;
 pub mod workspace;

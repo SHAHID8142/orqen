@@ -39,6 +39,34 @@ pub const MIGRATIONS: &[&str] = &[
     // a registry definition id; validity is enforced in Rust against the
     // built-in definitions, so no foreign key to a dynamic table).
     "ALTER TABLE settings ADD COLUMN main_agent_id TEXT;",
+    // v3 — Phase 4: per-project chat conversations and messages.
+    //
+    // Design notes:
+    // - `conversations.mode` is the mode in effect NOW; `messages.mode`
+    //   records the mode in effect when each message was added, so a
+    //   mid-conversation mode switch stays honestly visible in history.
+    // - Modes mirror GOVERNANCE.md §3 (chat modes never grant execution
+    //   privileges; the CHECK constraint keeps unknown modes out).
+    // - Deleting a project cascades to its conversations and, via the
+    //   second cascade, to their messages — no orphan transcripts.
+    "CREATE TABLE conversations (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('interview','research','planning','build','debug','review','discussion')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_conversations_project ON conversations(project_id, updated_at);
+    CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+        mode TEXT NOT NULL CHECK (mode IN ('interview','research','planning','build','debug','review','discussion')),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_messages_conversation ON messages(conversation_id, created_at, id);",
 ];
 
 /// Reads the currently recorded schema version.

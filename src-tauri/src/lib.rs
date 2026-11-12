@@ -51,6 +51,15 @@ pub fn run() {
             commands::settings::load_settings,
             commands::settings::update_settings,
             commands::settings::set_main_agent,
+            commands::chat::list_chat_modes,
+            commands::chat::list_conversations,
+            commands::chat::open_conversation,
+            commands::chat::create_conversation,
+            commands::chat::rename_conversation,
+            commands::chat::set_conversation_mode,
+            commands::chat::delete_conversation,
+            commands::chat::append_message,
+            commands::chat::export_conversation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

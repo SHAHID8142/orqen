@@ -49,11 +49,14 @@ Agent registry with capability metadata; adapter interface (provider-independent
 **Acceptance criteria:** run a trivial prompt through two different agents without core code changes; credentials never stored in repo/DB plaintext; process sandboxing documented; adapter conformance tests.
 
 ## Phase 4 — Chat Infrastructure & Modes
-Priority P1 | Dependencies: Phase 3
+**Status: delivered (Feature 001, 2026-11-13)** | Priority P1 | Dependencies: Phase 3
 
 Mode-aware chat surface (Interview, Research, Planning, Build, Debug, Review, Discussion per [GOVERNANCE.md §Chat modes](GOVERNANCE.md)); conversation persistence per project; message export.
 
-**Acceptance criteria:** mode switch changes interaction behavior, never execution permissions; history survives restart; export matches [COMMUNICATION.md](COMMUNICATION.md) formats.
+**Acceptance criteria:**
+- [x] Mode switch changes interaction framing only — never execution permissions (modes are a backend catalog with GOVERNANCE §3 purposes; switching updates the conversation record, nothing else).
+- [x] History survives restart (conversations + messages in SQLite, schema v3, migration + cascade tests).
+- [x] Export matches [COMMUNICATION.md](COMMUNICATION.md) conventions (structured content preserved verbatim; header metadata + honesty footer; D-026).
 
 ## Phase 5 — Interview Mode & Project Blueprint
 Priority P1 | Dependencies: Phase 4

@@ -1,5 +1,5 @@
 /**
- * Application shell tests: navigation between the five surfaces,
+ * Application shell tests: navigation between the six surfaces,
  * active-state semantics, header project reflection, sidebar behavior
  * and keyboard support. IPC is mocked; everything else runs for real.
  */
@@ -15,6 +15,7 @@ import {
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
+import { createAppChatStore } from "../lib/chat/ChatContext";
 import { createWorkspaceStore } from "../lib/workspace/store";
 import type { WorkspaceSnapshot } from "../types/workspace";
 
@@ -29,9 +30,16 @@ const invokeMock = vi.mocked(invoke);
 /** Minimal backend simulation so the app runs end-to-end in tests. */
 function installBackendSimulation(options: {
   loadWorkspace?: () => Promise<WorkspaceSnapshot>;
+  seedProject?: boolean;
 } = {}) {
   const projects: Array<{ id: string; name: string; createdAt: string }> = [];
   let selectedProjectId: string | null = null;
+  if (options.seedProject) {
+    projects.push({ id: "p-demo", name: "Demo project", createdAt: "2026-01-01T00:00:00Z" });
+    selectedProjectId = "p-demo";
+  }
+  let chatConversations: Array<{ id: string; projectId: string; title: string; mode: string; createdAt: string; updatedAt: string; messageCount: number }> = [];
+  const chatMessages: Array<{ id: string; conversationId: string; role: string; mode: string; content: string; createdAt: string }> = [];
   const settings = {
     approvalMode: "manual" as "manual" | "autonomous",
     maxRetry: 3,
@@ -105,6 +113,54 @@ function installBackendSimulation(options: {
             checkedAt: null,
           },
         ];
+      case "list_chat_modes":
+        return [
+          { id: "interview", purpose: "Requirements gathering toward a Project Blueprint." },
+          { id: "discussion", purpose: "Open exploration and proposals among user and agents; no commits." },
+        ];
+      case "list_conversations":
+        return payload.projectId === "p-demo" ? chatConversations : [];
+      case "create_conversation": {
+        const conversation = {
+          id: crypto.randomUUID(),
+          projectId: String(payload.projectId),
+          title: String(payload.title),
+          mode: String(payload.mode),
+          createdAt: "2026-01-02T00:00:00Z",
+          updatedAt: "2026-01-02T00:00:00Z",
+          messageCount: 0,
+        };
+        chatConversations = [conversation, ...chatConversations];
+        return conversation;
+      }
+      case "append_message": {
+        const conversationId = String(payload.conversationId);
+        const message = {
+          id: crypto.randomUUID(),
+          conversationId,
+          role: "user",
+          mode: "discussion",
+          content: String(payload.content),
+          createdAt: "2026-01-02T00:01:00Z",
+        };
+        chatMessages.push(message);
+        const conversation = chatConversations.find((c) => c.id === conversationId);
+        if (conversation) conversation.messageCount = chatMessages.length;
+        return {
+          conversation,
+          messages: chatMessages.filter((msg) => msg.conversationId === conversationId),
+        };
+      }
+      case "export_conversation": {
+        const conversationId = String(payload.id);
+        const conversation = chatConversations.find((c) => c.id === conversationId);
+        return {
+          conversationId,
+          title: conversation?.title ?? "Export",
+          filename: "transcript.md",
+          content: "# Conversation export\n\n## Transcript\n",
+        };
+      }
       case "discover_agent":
         return {
           id: String(payload.id),
@@ -161,7 +217,7 @@ describe("App shell navigation", () => {
   /** Lets queued store operations start before mid-flight assertions. */
   const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-  function renderApp() {
+  function renderApp(chatStore?: import("../lib/chat/store").ChatStore) {
     return render(
       <App
         workspace={createWorkspaceStore({
@@ -171,6 +227,7 @@ describe("App shell navigation", () => {
           select: (id) => invokeMock("select_project", { id }) as Promise<WorkspaceSnapshot>,
           remove: (id) => invokeMock("delete_project", { id }) as Promise<WorkspaceSnapshot>,
         })}
+        chat={chatStore}
       />,
     );
   }
@@ -210,12 +267,12 @@ describe("App shell navigation", () => {
     };
   }
 
-  it("renders all five navigation surfaces and starts on Overview", () => {
+  it("renders all six navigation surfaces and starts on Overview", () => {
     renderApp();
 
     const nav = screen.getByRole("navigation", { name: "Workspace sections" });
     expect(nav).toBeInTheDocument();
-    for (const label of ["Overview", "Projects", "Agents", "Workflows", "Settings"]) {
+    for (const label of ["Overview", "Projects", "Agents", "Chat", "Workflows", "Settings"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
     expect(
@@ -591,3 +648,79 @@ describe("App shell navigation", () => {
     expect(document.getElementById("workspace-sidebar")).not.toHaveAttribute("role");
   });
 });
+
+describe("App shell — Chat surface (Phase 4)", () => {
+  function renderChatApp(seedProject: boolean) {
+    installBackendSimulation({ seedProject });
+    // A fresh chat store per test: module-level singletons would leak
+    // state across tests. (renderApp lives in the sibling describe, so
+    // this helper renders independently.)
+    render(
+      <App
+        workspace={createWorkspaceStore({
+          load: () => invokeMock("load_workspace") as Promise<WorkspaceSnapshot>,
+          create: (name) =>
+            invokeMock("create_project", { name }) as Promise<WorkspaceSnapshot>,
+          select: (id) => invokeMock("select_project", { id }) as Promise<WorkspaceSnapshot>,
+          remove: (id) => invokeMock("delete_project", { id }) as Promise<WorkspaceSnapshot>,
+        })}
+        chat={createAppChatStore()}
+      />,
+    );
+  }
+
+  it("navigates to Chat and renders the layout with the backend mode catalog", async () => {
+    renderChatApp(true);
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    expect(screen.getByRole("heading", { level: 1, name: "Chat" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-new-form")).toBeInTheDocument();
+    });
+    // The mode select is populated from the backend catalog.
+    const modeSelect = screen.getByLabelText("Starting mode");
+    expect(modeSelect).toHaveTextContent("Interview");
+    expect(screen.getByText(/they never grant execution privileges/i)).toBeInTheDocument();
+    // The conversation list is empty on a fresh project.
+    expect(screen.getByTestId("chat-list-empty")).toBeInTheDocument();
+  });
+
+  it("creates a conversation, sends a message, and exports the transcript", async () => {
+    renderChatApp(true);
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("New conversation title")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("New conversation title"), {
+      target: { value: "Owner interview" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start conversation" }));
+    // The title appears in BOTH the list entry and the thread heading.
+    await waitFor(() => {
+      expect(screen.getAllByText("Owner interview").length).toBeGreaterThanOrEqual(2);
+    });
+
+    fireEvent.change(screen.getByLabelText(/Message \(recorded as a user turn/), {
+      target: { value: "Hello from the acceptance flow." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("Hello from the acceptance flow.")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Export transcript" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-export")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/transcript\.md/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByTestId("chat-export")).not.toBeInTheDocument();
+  });
+
+  it("shows the no-project state when nothing is selected", () => {
+    renderChatApp(false);
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    expect(screen.getByTestId("chat-no-project")).toBeInTheDocument();
+    expect(screen.getByText(/Chat conversations belong to a project/)).toBeInTheDocument();
+  });
+})
