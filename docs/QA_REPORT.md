@@ -406,7 +406,7 @@ All results below are observed outcomes; exit codes were captured without pipes 
 
 ## CI verification (GitHub Actions)
 
-**Status: BLOCKED — EXTERNAL (GitHub account-level billing restriction).**
+**Status: RESOLVED (2026-11-13 — see the RESOLVED note above). Historical record: GitHub account-level billing restriction.**
 
 Observed evidence (read from GitHub, never assumed):
 
@@ -428,6 +428,8 @@ Observed evidence (read from GitHub, never assumed):
 | 42360825377 | push 7feca81 (last review corrections) | `failure`, jobs refused | same billing-lock annotation; 0 steps executed — observed and recorded, not a code failure |
 
 Diagnosis: the workflow file is valid — `actionlint` exit 0, GitHub lists the workflow `active`, and jobs instantiated while runs were still being created — so the blocker is the **GitHub account billing restriction**, not the workflow. Per D-011 the repository stays PUBLIC and no Actions-minute purchases are required development steps; CI is simply recorded as blocked until GitHub permits execution again.
+
+**RESOLVED (2026-11-13):** the GitHub billing restriction has been lifted. Run **43300908425** for commit `ea1f183` (Phase 4 Feature 001) is the FIRST successful CI run in project history — both jobs PASSED on GitHub-observed evidence: Frontend (lint · typecheck · test · build) ✓ 1m17s; Rust (fmt · clippy · check) ✓ 1m57s (ubuntu-latest). The blocker rows below are historical records.
 
 **How to rerun CI when GitHub permits Actions execution** (no code changes needed):
 1. Prefer the manual path: repository → **Actions → CI → Run workflow** (`workflow_dispatch` trigger is configured).

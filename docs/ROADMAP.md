@@ -12,7 +12,7 @@ Private GitHub repository; runnable Tauri 2 + React + TypeScript desktop shell; 
 - [x] App launches on macOS; React interface renders; no simulated statuses.
 - [x] `npm run verify` (lint, typecheck, tests, build) passes; rust gates pass.
 - [x] Documentation set complete and internally consistent.
-- [~] CI configured and validated (`actionlint` clean; GitHub lists it active; jobs instantiate) — **execution BLOCKED — EXTERNAL** by an account-level GitHub billing restriction; CI has never reported a successful run. Local gates cover the same checks (see [QA_REPORT.md](QA_REPORT.md)).
+- [x] CI configured and validated — **GREEN as of 2026-11-13** (run 43300908425: Frontend + Rust jobs passed; the account-level billing restriction that had blocked execution since Phase 0 was lifted).
 - [x] No secrets committed.
 
 ## Phase 1 — Workspace Shell & Navigation
